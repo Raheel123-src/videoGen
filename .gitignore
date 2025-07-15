@@ -1,0 +1,70 @@
+# Python cache and build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
+
+# Virtual environments
+.env
+venv/
+.env
+.env.*
+
+# IDE/editor/project files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Flask/Uploads/Generated
+uploads/
+generated_images/
+generated_images_ideogram/
+heygen_videos/
+*.mp4
+*.wav
+*.m4a
+*.aac
+*.ogg
+
+# Transcripts, segments, and temp data
+transcripts/
+segments/
+*.srt
+*.json
+
+# Backgrounds and bulk CSVs (if not source data)
+background/
+bulk_csv/
+
+# Model/data cache
+*.pt
+*.pth
+*.ckpt
+
+# Misc
+*.bak
+*.tmp
+*.swp
+
+# API keys, secrets, and sensitive config
+.env
+.env.*
+*.key
+*.pem
+heygen_empty_spaces.json
+
+# Node/npm (if any frontend)
+node_modules/
+npm-debug.log
+
+# Test outputs
+test_*.pyc
+test_*.log

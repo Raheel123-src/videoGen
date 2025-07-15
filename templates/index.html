@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Transcription API</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .input-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .input-section h3 {
+            margin-top: 0;
+            color: #555;
+            border-bottom: 1px solid #007bff;
+            padding-bottom: 8px;
+        }
+        .file-input, .url-input {
+            margin: 10px 0;
+        }
+        .file-input label, .url-input label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #555;
+        }
+        input[type="url"], input[type="file"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        .submit-btn {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            margin-top: 15px;
+        }
+        .submit-btn:hover {
+            background-color: #0056b3;
+        }
+        .message {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .flash-messages {
+            margin: 20px 0;
+        }
+        .flash-message {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 5px;
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .download-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .download-btn {
+            background-color: #28a745;
+            color: white;
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .download-btn:hover {
+            background-color: #218838;
+        }
+        .download-btn.sentences {
+            background-color: #007bff;
+        }
+        .download-btn.sentences:hover {
+            background-color: #0056b3;
+        }
+        .download-btn.words {
+            background-color: #6f42c1;
+        }
+        .download-btn.words:hover {
+            background-color: #5a32a3;
+        }
+        .download-btn.segments {
+            background-color: #fd7e14;
+        }
+        .download-btn.segments:hover {
+            background-color: #e8690b;
+        }
+        .download-btn.video {
+            background-color: #e74c3c;
+        }
+        .download-btn.video:hover {
+            background-color: #c0392b;
+        }
+        .info-box {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+            font-size: 14px;
+        }
+        .info-box h4 {
+            margin-top: 0;
+            color: #0056b3;
+        }
+        .info-box p {
+            color: #555;
+        }
+        .theme-toggle {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: #333;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .dark-mode {
+            background-color: #1a1a1a;
+            color: #fff;
+        }
+        .dark-mode .container {
+            background: #2d2d2d;
+            color: #fff;
+        }
+        .dark-mode input {
+            background-color: #404040;
+            color: #fff;
+            border-color: #555;
+        }
+        .dark-mode .input-section {
+            border-color: #404040;
+        }
+        .video-section {
+            margin-top: 30px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            border: 2px solid #e9ecef;
+        }
+        .video-section h3 {
+            color: #495057;
+            margin-bottom: 15px;
+        }
+        .video-controls {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+        .video-controls label {
+            font-weight: bold;
+            color: #495057;
+        }
+        .video-controls select {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .video-controls input[type="checkbox"] {
+            margin-right: 5px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .control-group label {
+            font-weight: bold;
+            color: #495057;
+        }
+        .generate-video-btn {
+            background-color: #e74c3c;
+            color: white;
+            padding: 12px 25px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: bold;
+        }
+        .generate-video-btn:hover {
+            background-color: #c0392b;
+        }
+        .generate-video-btn:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        .combined-section {
+            margin-top: 30px;
+            padding: 25px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            border: 2px solid #e9ecef;
+        }
+        .combined-section h3 {
+            color: #495057;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        .combined-section h4 {
+            color: #495057;
+            margin-bottom: 10px;
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 5px;
+        }
+        .audio-inputs {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .audio-inputs .file-input,
+        .audio-inputs .url-input {
+            flex: 1;
+            min-width: 250px;
+        }
+        .video-settings {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+        }
+        .generate-complete-video-btn {
+            background-color: #28a745;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 18px;
+            font-weight: bold;
+            width: 100%;
+            margin-top: 20px;
+        }
+        .generate-complete-video-btn:hover {
+            background-color: #218838;
+        }
+        .generate-complete-video-btn:disabled {
+            background-color: #95a5a6;
+            cursor: not-allowed;
+        }
+        .status-indicator {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status-processing {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .status-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status-error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <button class="theme-toggle" onclick="toggleTheme()">🌙</button>
+    
+    <div class="container">
+        <h1>Audio Transcription API</h1>
+        
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for message in messages %}
+                        <div class="flash-message">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        <!-- Combined Audio Processing and Video Generation -->
+        <div class="combined-section">
+            <h3>🎬 Complete Video Generation</h3>
+            <p><strong>One-Click Process:</strong> Upload audio and generate video with custom settings in one step</p>
+            
+            <!-- Audio Input Section -->
+            <div class="input-section">
+                <h4>📁 Audio Input</h4>
+                <div class="audio-inputs">
+                    <div class="file-input">
+                        <label for="audio_file">Upload Audio File:</label>
+                        <input type="file" id="audio_file" name="audio_file" accept=".mp3,.wav,.m4a,.aac,.ogg">
+                    </div>
+                    
+                    <div class="url-input">
+                        <label for="audio_url">Or Enter Audio URL:</label>
+                        <input type="url" id="audio_url" name="audio_url" placeholder="https://example.com/audio.mp3">
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Video Settings Section -->
+            <div class="video-settings">
+                <h4>⚙️ Video Settings</h4>
+                <div class="video-controls">
+                    <div class="control-group">
+                        <label for="video_name">Video Name:</label>
+                        <input type="text" id="video_name" name="video_name" placeholder="Enter video name (e.g., my_presentation)" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; width: 200px;">
+                    </div>
+                    
+                    <div class="control-group">
+                        <label>
+                            <input type="checkbox" id="show_subtitles" checked> Show Subtitles
+                        </label>
+                    </div>
+                    
+                    <div class="control-group">
+                        <label for="selected_background">Background:</label>
+                        <select id="selected_background" name="selected_background">
+                            <option value="">Random</option>
+                            {% for bg in background_images %}
+                                <option value="{{ bg }}" {% if selected_background == bg %}selected{% endif %}>{{ bg }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <button id="generate-complete-video-btn" class="generate-complete-video-btn">
+                🎬 Generate Complete Video
+            </button>
+            
+            <div id="complete-status" class="status-indicator" style="display: none;"></div>
+        </div>
+        
+        <!-- Video Player Section -->
+        <div id="video-player-section" style="margin-top: 30px; display: none;">
+            <h3>📺 Preview Video</h3>
+            <video id="generated-video" width="100%" height="400" controls style="border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+                <source id="generated-video-source" src="" type="video/mp4">
+                Your browser does not support the video tag.
+            </video>
+        </div>
+        
+        <!-- Info Box -->
+        <div class="info-box">
+            <h4>API Info</h4>
+            <p><strong>Formats:</strong> MP3, WAV, M4A, AAC, OGG</p>
+            <p><strong>Model:</strong> OpenAI Whisper + GPT-4o</p>
+            <p><strong>Output:</strong> Three files - sentences, words & visual segments</p>
+            <p><strong>New:</strong> 10 different markdown slide formats for typewriter-style videos</p>
+            <p><strong>Video:</strong> Generate MP4 videos with synchronized slides and subtitles</p>
+        </div>
+    </div>
+
+    <script>
+        // Form field caching
+        const audioUrlInput = document.getElementById('audio_url');
+        const audioFileInput = document.getElementById('audio_file');
+        
+        // Load cached values on page load
+        window.addEventListener('load', function() {
+            const cachedUrl = localStorage.getItem('cached_audio_url');
+            if (cachedUrl) {
+                audioUrlInput.value = cachedUrl;
+            }
+        });
+        
+        // Cache URL input on change
+        audioUrlInput.addEventListener('input', function() {
+            localStorage.setItem('cached_audio_url', this.value);
+        });
+        
+        // Cache file selection
+        audioFileInput.addEventListener('change', function() {
+            if (this.files.length > 0) {
+                localStorage.setItem('cached_file_name', this.files[0].name);
+            }
+        });
+        
+        // Theme toggle
+        function toggleTheme() {
+            document.body.classList.toggle('dark-mode');
+            const btn = document.querySelector('.theme-toggle');
+            btn.textContent = document.body.classList.contains('dark-mode') ? '☀️' : '🌙';
+        }
+
+        // Combined audio processing and video generation
+        const generateCompleteBtn = document.getElementById('generate-complete-video-btn');
+        const completeStatus = document.getElementById('complete-status');
+        const videoPlayerSection = document.getElementById('video-player-section');
+        const generatedVideo = document.getElementById('generated-video');
+        const generatedVideoSource = document.getElementById('generated-video-source');
+        
+        if (generateCompleteBtn) {
+            generateCompleteBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                
+                // Get form data
+                const audioFile = audioFileInput.files[0];
+                const audioUrl = audioUrlInput.value.trim();
+                const videoName = document.getElementById('video_name').value.trim();
+                const showSubtitles = document.getElementById('show_subtitles').checked;
+                const selectedBg = document.getElementById('selected_background') ? document.getElementById('selected_background').value : '';
+                
+                // Validate inputs
+                if (!audioFile && !audioUrl) {
+                    alert('Please provide either an audio file or audio URL');
+                    return;
+                }
+                
+                if (!videoName) {
+                    alert('Please enter a video name');
+                    return;
+                }
+                
+                // Show processing status
+                generateCompleteBtn.disabled = true;
+                generateCompleteBtn.textContent = '🎬 Processing Audio & Generating Video...';
+                completeStatus.style.display = 'block';
+                completeStatus.className = 'status-indicator status-processing';
+                completeStatus.textContent = 'Step 1: Processing audio and generating slides...';
+                
+                // Create FormData for file upload
+                const formData = new FormData();
+                if (audioFile) {
+                    formData.append('audio_file', audioFile);
+                }
+                if (audioUrl) {
+                    formData.append('audio_url', audioUrl);
+                }
+                formData.append('video_name', videoName);
+                formData.append('show_subtitles', showSubtitles);
+                formData.append('selected_background', selectedBg);
+                
+                // Make API call to process audio and generate video
+                fetch('/process_and_generate_video', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        completeStatus.className = 'status-indicator status-success';
+                        completeStatus.textContent = 'Video generated successfully!';
+                        // Always show the overlay video for preview if available
+                        let videoUrl = '';
+                        if (data.overlay_video_preview_url) {
+                            videoUrl = data.overlay_video_preview_url;
+                        }
+                        if (videoUrl) {
+                            generatedVideoSource.src = videoUrl;
+                            generatedVideo.load();
+                            videoPlayerSection.style.display = 'block';
+                        } else {
+                            videoPlayerSection.style.display = 'none';
+                            completeStatus.textContent = 'Overlay video not available.';
+                        }
+                    } else {
+                        completeStatus.className = 'status-indicator status-error';
+                        completeStatus.textContent = 'Error: ' + (data.error || 'Failed to generate video');
+                        videoPlayerSection.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    completeStatus.className = 'status-indicator status-error';
+                    completeStatus.textContent = 'Error: ' + error.message;
+                    videoPlayerSection.style.display = 'none';
+                })
+                .finally(() => {
+                    generateCompleteBtn.disabled = false;
+                    generateCompleteBtn.textContent = '🎬 Generate Complete Video';
+                });
+            });
+        }
+    </script>
+</body>
+</html> 
