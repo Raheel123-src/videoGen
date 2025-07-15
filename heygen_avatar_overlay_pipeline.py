@@ -198,6 +198,7 @@ def main():
         height = int(slide['empty_space']['height'])
         # Step 2: Extract and upload audio segment
         audio_url = extract_and_upload_audio_segment(AUDIO_FILE, start_time, end_time, slide_number)
+        print(f'Audio URL: {audio_url}')
         if not audio_url:
             continue
         # Step 3: Call HeyGen API with audio
