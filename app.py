@@ -415,7 +415,6 @@ LEFT_MARGIN = 80
 TOP_MARGIN = 120
 BULLET_SPACING = 44  # BODY_FONT_SIZE + 8
 SUBTITLE_HEIGHT = 60  # Estimated subtitle box height
-BOTTOM_MARGIN = 80  # Space from bottom for subtitle
 
 def wrap_text(text, font, max_width, draw):
     words = text.split()
@@ -441,6 +440,10 @@ def calculate_empty_space(slide, title_font, body_font):
         return None
     title = slide.get('title', '')
     bullets = slide.get('bullets', [])
+    SLIDE_WIDTH = 1920
+    SLIDE_HEIGHT = 1080
+    LEFT_MARGIN = 80
+    TOP_MARGIN = 120
     max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
     img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
     draw = ImageDraw.Draw(img)
@@ -455,9 +458,9 @@ def calculate_empty_space(slide, title_font, body_font):
             y += body_font.size + 8
         y += 24
     bullets_end_y = y
-    subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
+    # Use the full area below the bullets, including the subtitle region
     empty_space_top = bullets_end_y
-    empty_space_bottom = subtitle_y
+    empty_space_bottom = SLIDE_HEIGHT
     empty_space_height = max(0, empty_space_bottom - empty_space_top)
     if format_type == 2:
         x = LEFT_MARGIN
@@ -781,25 +784,24 @@ LEFT_MARGIN = 80
 TOP_MARGIN = 120
 BULLET_SPACING = 44  # BODY_FONT_SIZE + 8
 SUBTITLE_HEIGHT = 60  # Estimated subtitle box height
-BOTTOM_MARGIN = 80  # Space from bottom for subtitle
 
-def wrap_text(text, font, max_width, draw):
-    words = text.split()
-    lines = []
-    current_line = ''
-    for word in words:
-        test_line = current_line + (' ' if current_line else '') + word
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        width = bbox[2] - bbox[0]
-        if width <= max_width:
-            current_line = test_line
-        else:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
-    if current_line:
-        lines.append(current_line)
-    return lines
+# def wrap_text(text, font, max_width, draw):
+#     words = text.split()
+#     lines = []
+#     current_line = ''
+#     for word in words:
+#         test_line = current_line + (' ' if current_line else '') + word
+#         bbox = draw.textbbox((0, 0), test_line, font=font)
+#         width = bbox[2] - bbox[0]
+#         if width <= max_width:
+#             current_line = test_line
+#         else:
+#             if current_line:
+#                 lines.append(current_line)
+#             current_line = word
+#     if current_line:
+#         lines.append(current_line)
+#     return lines
 
 def calculate_empty_space(slide, title_font, body_font):
     format_type = slide.get('format')
@@ -807,6 +809,10 @@ def calculate_empty_space(slide, title_font, body_font):
         return None
     title = slide.get('title', '')
     bullets = slide.get('bullets', [])
+    SLIDE_WIDTH = 1920
+    SLIDE_HEIGHT = 1080
+    LEFT_MARGIN = 80
+    TOP_MARGIN = 120
     max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
     img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
     draw = ImageDraw.Draw(img)
@@ -821,9 +827,9 @@ def calculate_empty_space(slide, title_font, body_font):
             y += body_font.size + 8
         y += 24
     bullets_end_y = y
-    subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
+    # Use the full area below the bullets, including the subtitle region
     empty_space_top = bullets_end_y
-    empty_space_bottom = subtitle_y
+    empty_space_bottom = SLIDE_HEIGHT
     empty_space_height = max(0, empty_space_bottom - empty_space_top)
     if format_type == 2:
         x = LEFT_MARGIN
@@ -1182,12 +1188,50 @@ def process_and_generate_video():
                             except Exception as e:
                                 print(f'[COMBINED API] Error loading overlay for slide {slide_number}: {e}')
                         if overlays:
-                            final = CompositeVideoClip([main_video] + overlays, size=main_video.size)
+                            # --- Add subtitles as a top overlay ---
+                            try:
+                                from moviepy.editor import TextClip
+                                import srt
+                                # Extract subtitles from the word SRT file
+                                word_srt_file = os.path.join(app.config['TRANSCRIPTS_FOLDER'], f"{video_name}_words.srt")
+                                subtitle_clips = []
+                                if os.path.exists(word_srt_file):
+                                    with open(word_srt_file, 'r', encoding='utf-8') as f:
+                                        srt_content = f.read()
+                                    try:
+                                        subs = list(srt.parse(srt_content))
+                                        for sub in subs:
+                                            try:
+                                                txt_clip = TextClip(
+                                                    sub.content,
+                                                    fontsize=42,
+                                                    font='CircularStd-Book',
+                                                    color='black',
+                                                    size=(main_video.size[0] - 120, None),
+                                                    method='caption',
+                                                    align='center',
+                                                    bg_color='white'  # fallback to solid white
+                                                ).set_position(('center', 'bottom')).set_start(sub.start.total_seconds()).set_end(sub.end.total_seconds())
+                                                subtitle_clips.append(txt_clip)
+                                            except Exception as e:
+                                                print(f'[COMBINED API] Error creating TextClip for subtitle: {e}')
+                                    except Exception as e:
+                                        print(f'[COMBINED API] Error parsing SRT for subtitles: {e}')
+                                else:
+                                    print(f'[COMBINED API] Word SRT file not found for subtitles: {word_srt_file}')
+                            except ImportError as e:
+                                print(f'[COMBINED API] Required module for subtitles not found: {e}')
+                                subtitle_clips = []
+                            except Exception as e:
+                                print(f'[COMBINED API] Unexpected error in subtitle overlay: {e}')
+                                subtitle_clips = []
+                            # Compose all layers: main video, overlays, then subtitles
+                            final = CompositeVideoClip([main_video] + overlays + subtitle_clips, size=main_video.size)
                             overlay_output = os.path.join(app.config['UPLOAD_FOLDER'], f"heygen_overlay_{video_name}.mp4")
                             final.write_videofile(overlay_output, codec='libx264', audio_codec='aac', fps=main_video.fps, threads=4, verbose=False, logger=None)
                             final.close()
                             overlay_filename = os.path.basename(overlay_output)
-                            print(f'[COMBINED API] Final video with HeyGen overlays saved: {overlay_output}')
+                            print(f'[COMBINED API] Final video with HeyGen overlays and subtitles saved: {overlay_output}')
                         else:
                             print('[COMBINED API] No HeyGen overlays to apply.')
                             overlay_filename = None
