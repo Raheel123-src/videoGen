@@ -60,25 +60,46 @@ class VideoGenerator:
     def load_word_segments(self, word_srt_file):
         """Load word-level timing from SRT file"""
         word_segments = []
-        with open(word_srt_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-            blocks = content.strip().split('\n\n')
-            
-            for block in blocks:
-                lines = block.strip().split('\n')
-                if len(lines) >= 3:
-                    # Parse timing
-                    timing = lines[1]
-                    start_time, end_time = self.parse_srt_time(timing)
-                    
-                    # Parse text
-                    text = ' '.join(lines[2:]).strip()
-                    word_segments.append({
-                        'start': start_time,
-                        'end': end_time,
-                        'text': text
-                    })
+        print_flush(f"[DEBUG] Loading word segments from: {word_srt_file}")
+        print_flush(f"[DEBUG] File exists: {os.path.exists(word_srt_file)}")
         
+        try:
+            with open(word_srt_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                print_flush(f"[DEBUG] SRT file content length: {len(content)}")
+                blocks = content.strip().split('\n\n')
+                print_flush(f"[DEBUG] Found {len(blocks)} blocks in SRT file")
+                
+                for i, block in enumerate(blocks):
+                    lines = block.strip().split('\n')
+                    print_flush(f"[DEBUG] Block {i}: {len(lines)} lines")
+                    if len(lines) >= 3:
+                        # Parse timing
+                        timing = lines[1]
+                        print_flush(f"[DEBUG] Timing line: '{timing}'")
+                        time_parts = timing.split(' --> ')
+                        print_flush(f"[DEBUG] Time parts: {time_parts}")
+                        
+                        if len(time_parts) >= 2:
+                            start_time, end_time = self.parse_srt_time(timing)
+                            
+                            # Parse text
+                            text = ' '.join(lines[2:]).strip()
+                            word_segments.append({
+                                'start': start_time,
+                                'end': end_time,
+                                'text': text
+                            })
+                        else:
+                            print_flush(f"[ERROR] Invalid timing format in block {i}: '{timing}'")
+                    else:
+                        print_flush(f"[ERROR] Block {i} has insufficient lines: {len(lines)}")
+        except Exception as e:
+            print_flush(f"[ERROR] Failed to load word segments: {e}")
+            # Return empty list as fallback
+            return []
+        
+        print_flush(f"[DEBUG] Loaded {len(word_segments)} word segments")
         return word_segments
     
     def parse_srt_time(self, timing_str):
@@ -173,7 +194,8 @@ class VideoGenerator:
         if current_line:
             lines.append(current_line)
         # Draw background rectangle
-        total_height = len(lines) * (font.size + 8) - 8
+        text_height = draw.textbbox((0,0), 'A', font=font)[3] - draw.textbbox((0,0), 'A', font=font)[1]
+        total_height = len(lines) * (text_height + 8) - 8
         y = self.height - margin - total_height
         max_line_width = max(draw.textbbox((0,0), line, font=font)[2] - draw.textbbox((0,0), line, font=font)[0] for line in lines)
         x = (self.width - max_line_width) // 2 - 20
@@ -188,7 +210,7 @@ class VideoGenerator:
             w = bbox[2] - bbox[0]
             x_line = (self.width - w) // 2
             draw.text((x_line, y_line), line, fill=(0,0,0), font=font)
-            y_line += font.size + 8
+            y_line += text_height + 8
 
     def create_slide_image(self, slide_dict, current_time, segment_start_time, slide_bullet_offset=0, background_img=None, subtitle_text=None, reveal_state=None, segment_duration=None):
         """Render slide from slide_dict (JSON) according to format, with typewriter and highlight animation."""
@@ -219,6 +241,8 @@ class VideoGenerator:
         # Format 1: Heading + Bullets (text-only)
         if format_type == 1:
             draw = ImageDraw.Draw(img)
+            title_text_height = draw.textbbox((0,0), 'A', font=self.title_font)[3] - draw.textbbox((0,0), 'A', font=self.title_font)[1]
+            body_text_height = draw.textbbox((0,0), 'A', font=self.body_font)[3] - draw.textbbox((0,0), 'A', font=self.body_font)[1]
             x0 = 80
             y0 = 120
             max_text_width = self.width//2 - 2*x0
@@ -226,7 +250,7 @@ class VideoGenerator:
                 lines = self._wrap_text(title, self.title_font, max_text_width, draw)
                 for line in lines:
                     draw.text((x0, y0), line, fill=self.text_color, font=self.title_font)
-                    y0 += self.title_font.size + 10
+                    y0 += title_text_height + 10
                 y0 += 120  # Increased spacing between title and bullets (3x)
             fade_in_duration = 0.5
             for i, bullet in enumerate(bullets):
@@ -247,7 +271,7 @@ class VideoGenerator:
                         pre, word, post = line.partition(highlight_word)
                         w_pre = draw.textbbox((0,0), pre, font=self.body_font)[2]
                         w_word = draw.textbbox((0,0), word, font=self.body_font)[2]
-                        h_word = self.body_font.size + 8
+                        h_word = body_text_height + 8
                         rect_x = x0 + w_pre
                         rect_y = y0 - 4
                         draw.rounded_rectangle([rect_x, rect_y, rect_x + w_word, rect_y + h_word], radius=8, fill=(255, 215, 0, int(alpha*0.8)))
@@ -256,7 +280,7 @@ class VideoGenerator:
                         draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
                     else:
                         draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 10
+                    y0 += body_text_height + 10
             self._draw_subtitle(img, subtitle_text)
             return img
         # Format 2: Left text, right image (overlay image on right half, background is full slide)
@@ -279,7 +303,6 @@ class VideoGenerator:
                 # Always start with a larger crop for movement, guarantee full coverage
                 crop_scale_start = 1.18
                 crop_scale_end = 1.0
-                # For zoom in/out, interpolate scale
                 if effect == 'zoom_in':
                     scale = crop_scale_start - (crop_scale_start - crop_scale_end) * progress
                     crop_w = int(base_w * scale)
@@ -330,6 +353,8 @@ class VideoGenerator:
                     sample_img_cropped = img_crop.crop((dx, dy, dx + base_w, dy + base_h))
                 img.paste(sample_img_cropped, (self.width//2, 0))
             draw = ImageDraw.Draw(img, 'RGBA')
+            title_text_height = draw.textbbox((0,0), 'A', font=self.title_font)[3] - draw.textbbox((0,0), 'A', font=self.title_font)[1]
+            body_text_height = draw.textbbox((0,0), 'A', font=self.body_font)[3] - draw.textbbox((0,0), 'A', font=self.body_font)[1]
             x0 = 90  # Move title and bullets slightly more left for format 2
             y0 = 120
             max_text_width = self.width//2 - 2*x0
@@ -348,7 +373,7 @@ class VideoGenerator:
                     line_to_draw = line[:max(0, min(len(line), chars_to_show - chars_drawn))]
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
-                    y0 += self.title_font.size + 10
+                    y0 += title_text_height + 10
                 y0 += 120  # Consistent spacing between title and bullets
             # Bullets fade in one by one, each over 0.7s, with 1s pause between
             bullets_start_time = segment_start_time + title_reveal_duration
@@ -361,7 +386,7 @@ class VideoGenerator:
                 t = current_time - bullet_appear
                 alpha = int(255 * min(1.0, max(0, t / bullet_fade_duration))) if t > 0 else 0
                 if alpha == 0:
-                    y0 += self.body_font.size + 32  # Still increment y0 to keep spacing
+                    y0 += body_text_height + 32  # Still increment y0 to keep spacing
                     continue  # Skip drawing this bullet until its fade-in starts
                 bullet_text = bullet
                 # Parse <highlight> tags in bullet
@@ -378,7 +403,7 @@ class VideoGenerator:
                     # Draw bullet dot only for the first line of each bullet point
                     if alpha > 0 and line_idx == 0:
                         dot_radius = 7
-                        dot_y = y0 + self.body_font.size//2
+                        dot_y = y0 + body_text_height//2
                         draw.ellipse([x0 - 30, dot_y - dot_radius, x0 - 16, dot_y + dot_radius], fill=(0,0,0,alpha))
                     # Highlight animation logic
                     highlight_box_alpha = alpha
@@ -387,7 +412,7 @@ class VideoGenerator:
                         pre, word, post = line.partition(highlight_word)
                         w_pre = draw.textbbox((0,0), pre, font=self.body_font)[2]
                         w_word = draw.textbbox((0,0), word, font=self.body_font)[2]
-                        h_word = self.body_font.size + 8
+                        h_word = body_text_height + 8
                         rect_x = x0 + w_pre
                         rect_y = y0 - 4
                         # Animate highlight box only after all bullets are revealed
@@ -402,7 +427,7 @@ class VideoGenerator:
                         draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
                     else:
                         draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 32  # More space between bullet lines for aesthetics
+                    y0 += body_text_height + 32  # More space between bullet lines for aesthetics
             self._draw_subtitle(img, subtitle_text)
             return img
         # Format 3: Left image, right text (overlay image on left half, background is full slide)
@@ -471,6 +496,8 @@ class VideoGenerator:
                     sample_img_cropped = img_crop.crop((dx, dy, dx + base_w, dy + base_h))
                 img.paste(sample_img_cropped, (0, 0))
             draw = ImageDraw.Draw(img, 'RGBA')
+            title_text_height = draw.textbbox((0,0), 'A', font=self.title_font)[3] - draw.textbbox((0,0), 'A', font=self.title_font)[1]
+            body_text_height = draw.textbbox((0,0), 'A', font=self.body_font)[3] - draw.textbbox((0,0), 'A', font=self.body_font)[1]
             x0 = self.width//2 + 120  # Keep the same layout
             y0 = 120
             max_text_width = self.width//2 - 2*80
@@ -489,7 +516,7 @@ class VideoGenerator:
                     line_to_draw = line[:max(0, min(len(line), chars_to_show - chars_drawn))]
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
-                    y0 += self.title_font.size + 10
+                    y0 += title_text_height + 10
                 y0 += 120  # Consistent spacing between title and bullets
             # Bullets fade in one by one, each over 0.7s, with 1s pause between
             bullets_start_time = segment_start_time + title_reveal_duration
@@ -502,7 +529,7 @@ class VideoGenerator:
                 t = current_time - bullet_appear
                 alpha = int(255 * min(1.0, max(0, t / bullet_fade_duration))) if t > 0 else 0
                 if alpha == 0:
-                    y0 += self.body_font.size + 32  # Still increment y0 to keep spacing
+                    y0 += body_text_height + 32  # Still increment y0 to keep spacing
                     continue  # Skip drawing this bullet until its fade-in starts
                 bullet_text = bullet
                 # Parse <highlight> tags in bullet
@@ -519,7 +546,7 @@ class VideoGenerator:
                     # Draw bullet dot only for the first line of each bullet point
                     if alpha > 0 and line_idx == 0:
                         dot_radius = 7
-                        dot_y = y0 + self.body_font.size//2
+                        dot_y = y0 + body_text_height//2
                         draw.ellipse([x0 - 30, dot_y - dot_radius, x0 - 16, dot_y + dot_radius], fill=(0,0,0,alpha))
                     # Highlight animation logic
                     highlight_box_alpha = alpha
@@ -528,7 +555,7 @@ class VideoGenerator:
                         pre, word, post = line.partition(highlight_word)
                         w_pre = draw.textbbox((0,0), pre, font=self.body_font)[2]
                         w_word = draw.textbbox((0,0), word, font=self.body_font)[2]
-                        h_word = self.body_font.size + 8
+                        h_word = body_text_height + 8
                         rect_x = x0 + w_pre
                         rect_y = y0 - 4
                         # Animate highlight box only after all bullets are revealed
@@ -543,7 +570,7 @@ class VideoGenerator:
                         draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
                     else:
                         draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 32  # More space between bullet lines for aesthetics
+                    y0 += body_text_height + 32  # More space between bullet lines for aesthetics
             self._draw_subtitle(img, subtitle_text)
             return img
         # Format 4: Full image only (overlay image on full slide, background is still present but covered)
@@ -692,15 +719,35 @@ class VideoGenerator:
             shutil.rmtree(temp_subtitles_dir)
         print_flush("Loading segments data...")
         segments_data = self.load_segments_data(segments_file)
+        print_flush(f"[DEBUG] segments_data loaded: {segments_data}")
+        print_flush(f"[DEBUG] segments_data keys: {list(segments_data.keys())}")
+        print_flush(f"[DEBUG] segments_data['segments'] length: {len(segments_data['segments'])}")
+        print_flush(f"[DEBUG] segments_data['segments'] sample: {segments_data['segments'][:2]}")
+        
+        # Load word segments for subtitle generation
         word_segments = self.load_word_segments(word_srt_file)
+        print_flush(f"[DEBUG] word_segments loaded, length: {len(word_segments)}")
+        
         # Load slides.json
         slides_json_path = os.path.join(self.segments_folder, 'slides.json')
-        with open(slides_json_path, 'r', encoding='utf-8') as f:
+        print_flush(f"[DEBUG] slides_json_path: {slides_json_path}")
+        print_flush(f"[DEBUG] slides.json exists: {os.path.exists(slides_json_path)}")
+        with open(slides_json_path, 'r') as f:
             slides = json.load(f)
-        print_flush(f"[DEBUG] Loaded {len(slides)} slides from slides.json")
+        print_flush(f"[DEBUG] slides loaded, type: {type(slides)}, length: {len(slides)}")
+        print_flush(f"[DEBUG] slides sample: {slides[:2]}")
+
+        seg_len = len(segments_data['segments'])
+        slides_len = len(slides)
+        print_flush(f"[DEBUG] segments length: {seg_len}, slides length: {slides_len}")
+        if seg_len != slides_len:
+            print_flush(f"[ERROR] Mismatch: segments ({seg_len}) != slides ({slides_len})")
+            raise Exception(f"Mismatch between segments and slides: {seg_len} vs {slides_len}")
+
         print_flush("Creating video clips...")
         video_clips = []
-        total_segments = len(segments_data['segments'])
+        total_segments = len(segments_data['segments']) if 'segments' in segments_data else 0
+        print_flush(f"[DEBUG] total_segments: {total_segments}")
         # Select background image
         background_img = None
         if selected_background:
@@ -732,8 +779,9 @@ class VideoGenerator:
             # Always pass the background_img argument
             return self.create_slide_image(slide_dict, current_time, segment_start_time, background_img=background_img, subtitle_text=subtitle_text, reveal_state=reveal_state, segment_duration=segment_duration)
 
-        for idx, segment in enumerate(segments_data['segments']):
+        for idx, segment in enumerate(segments_data.get('segments', [])):
             print_flush(f"[DEBUG] Processing segment {idx}: {segment}")
+            print_flush(f"[DEBUG] slides length: {len(slides)}")
             if idx < len(slides):
                 slide_dict = slides[idx]
                 print_flush(f"[DEBUG] Using slide_dict: {slide_dict}")
@@ -794,19 +842,24 @@ class VideoGenerator:
         for i, clip in enumerate(video_clips):
             print_flush(f"[CONCAT DEBUG] Clip {i}: duration={clip.duration}s")
         # Ensure the last slide stays until the end
-        total_duration = segments_data['segments'][-1]['end_time']
+        if 'segments' in segments_data and segments_data['segments']:
+            total_duration = segments_data['segments'][-1].get('end_time', 0)
+        else:
+            print_flush('[ERROR] segments_data["segments"] is missing or empty!')
+            total_duration = 0
         current_duration = sum([clip.duration for clip in video_clips])
-        if current_duration < total_duration:
+        print_flush(f"[DEBUG] total_duration: {total_duration}, current_duration: {current_duration}")
+        if current_duration < total_duration and len(slides) > 0 and 'segments' in segments_data and len(segments_data['segments']) > 0:
             print_flush(f"[FIX] Adding still frame for last slide to fill {total_duration - current_duration:.2f}s gap at end.")
             last_slide = slides[-1]
             last_segment = segments_data['segments'][-1]
             def make_last_frame(t):
-                reveal_time = last_segment['start_time'] + last_segment['duration'] + 5
+                reveal_time = last_segment['start_time'] + last_segment.get('duration', 5) + 5
                 return np.array(create_slide_image_with_bg(
                     last_slide,
                     reveal_time,
                     last_segment['start_time'],
-                    segment_duration=last_segment['duration']
+                    segment_duration=last_segment.get('duration', 5)
                 ))
             gap_duration = total_duration - current_duration
             if gap_duration > 0.01:
