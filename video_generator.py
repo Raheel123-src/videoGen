@@ -635,50 +635,28 @@ class VideoGenerator:
             return img
     
     def create_subtitle_text(self, word_segments, current_time):
-        """Create subtitle text for current time"""
+        """Create subtitle text for current time, showing at most 7 words per segment, refreshing only when a new 7-word segment is reached."""
         print_flush(f"[DEBUG] create_subtitle_text called with {len(word_segments)} word segments, current_time={current_time}")
         if word_segments:
             print_flush(f"[DEBUG] First word segment: {word_segments[0]}")
-        
-        # Group words into sentences
-        sentences = []
-        current_sentence = []
-        current_sentence_start = 0
-        
+        # Flatten all words up to current_time
+        revealed_words = []
         for word in word_segments:
-            current_sentence.append(word)
-            # Check if this word ends a sentence (simple heuristic)
-            if word['text'].endswith('.') or word['text'].endswith('!') or word['text'].endswith('?'):
-                sentences.append({
-                    'words': current_sentence,
-                    'start': current_sentence_start,
-                    'end': word['end']
-                })
-                current_sentence = []
-                current_sentence_start = word['end']
-        
-        # Add any remaining words as a sentence
-        if current_sentence:
-            sentences.append({
-                'words': current_sentence,
-                'start': current_sentence_start,
-                'end': current_sentence[-1]['end']
-            })
-        
-        # Find current sentence
-        current_sentence_text = ""
-        for sentence in sentences:
-            if sentence['start'] <= current_time <= sentence['end']:
-                # Progressive reveal: show words that have been spoken
-                revealed_words = []
-                for word in sentence['words']:
-                    if word['end'] <= current_time:
-                        revealed_words.append(word['text'])
-                    else:
-                        break
-                current_sentence_text = " ".join(revealed_words)
+            if word['end'] <= current_time:
+                revealed_words.append(word['text'])
+            else:
                 break
-        
+        # Show the most recent 7-word segment
+        n = len(revealed_words)
+        if n == 0:
+            return ""
+        # Find which 7-word segment we are in
+        segment_size = 7
+        segment_idx = (n - 1) // segment_size
+        start_idx = segment_idx * segment_size
+        end_idx = min(start_idx + segment_size, n)
+        current_segment_words = revealed_words[start_idx:end_idx]
+        current_sentence_text = " ".join(current_segment_words)
         return current_sentence_text
     
     def generate_video(self, segments_file, word_srt_file, audio_file, output_file, show_subtitles=True, selected_background=None):

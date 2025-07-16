@@ -366,17 +366,37 @@ def format_time(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 def create_srt_file(segments, output_path):
-    """Create SRT file from transcription segments"""
+    """Create SRT file from transcription segments, with each subtitle max 10 words and bold text."""
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            for i, segment in enumerate(segments, 1):
-                start_time = format_time(segment['start'])
-                end_time = format_time(segment['end'])
-                
-                f.write(f"{i}\n")
-                f.write(f"{start_time} --> {end_time}\n")
-                f.write(f"{segment['text']}\n\n")
-        
+            idx = 1
+            for segment in segments:
+                # Ensure segment is a dict and has required keys
+                if not isinstance(segment, dict):
+                    continue
+                text = segment.get('text', '')
+                start = segment.get('start', 0)
+                end = segment.get('end', 0)
+                words = text.split() if isinstance(text, str) else []
+                n = len(words)
+                if n == 0:
+                    continue
+                # Calculate duration per word
+                total_time = end - start
+                time_per_word = total_time / n if n > 0 else 0
+                for i in range(0, n, 10):
+                    chunk_words = words[i:i+10]
+                    chunk_text = ' '.join(chunk_words)
+                    # Bold the text using <b>...</b>
+                    chunk_text = f"<b>{chunk_text}</b>"
+                    chunk_start = start + i * time_per_word
+                    chunk_end = start + min(i+10, n) * time_per_word
+                    start_time = format_time(chunk_start)
+                    end_time = format_time(chunk_end)
+                    f.write(f"{idx}\n")
+                    f.write(f"{start_time} --> {end_time}\n")
+                    f.write(f"{chunk_text}\n\n")
+                    idx += 1
         return True
     except Exception as e:
         raise Exception(f"Error creating SRT file: {str(e)}")
