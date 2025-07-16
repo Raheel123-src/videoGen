@@ -15,6 +15,8 @@ from video_generator import VideoGenerator
 import sys
 import subprocess
 from urllib.parse import urlparse
+import boto3
+from botocore.exceptions import BotoCoreError, NoCredentialsError
 
 # Load environment variables
 load_dotenv()
@@ -31,6 +33,23 @@ for folder in [UPLOAD_FOLDER, TRANSCRIPTS_FOLDER, SEGMENTS_FOLDER]:
 
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_DEFAULT_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID") or "ftDdhfYtmfGP0tFlBYA1"
+
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+
+
+def upload_video_to_s3(video_path: str, filename: str) -> str:
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_DEFAULT_REGION
+    )
+    with open(video_path, "rb") as f:
+        s3.put_object(Bucket=S3_BUCKET_NAME, Key=filename, Body=f, ContentType="video/mp4")
+    return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{filename}"
 
 # Whisper model cache
 g_whisper_model = None
@@ -324,7 +343,10 @@ async def process_and_generate_video(
         video_gen.generate_video(segments_filepath, word_srt_filepath, filepath, output_video, 
                                show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
         print(f"[COMBINED API] Video generated successfully: {output_video}")
-        return {"success": True, "video_filename": os.path.basename(output_video), "message": "Complete video generated successfully"}
+        # Upload to S3 using put_object
+        filename = os.path.basename(output_video)
+        s3_url = upload_video_to_s3(output_video, filename)
+        return {"success": True, "video_filename": filename, "s3_url": s3_url, "message": "Complete video generated and uploaded successfully"}
     except Exception as e:
         print(f"[COMBINED API ERROR] Process failed: {e}")
         return JSONResponse({"error": str(e)}, status_code=500) 
