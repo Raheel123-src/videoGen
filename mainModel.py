@@ -3,6 +3,7 @@ import re
 import random
 import uuid
 import requests
+import time
 from typing import Optional, Tuple
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
@@ -17,6 +18,9 @@ import subprocess
 from urllib.parse import urlparse
 import boto3
 from botocore.exceptions import BotoCoreError, NoCredentialsError
+from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip
+from PIL import Image, ImageDraw, ImageFont
+import numpy as np
 
 # Load environment variables
 load_dotenv()
@@ -38,6 +42,19 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+
+# --- HeyGen Overlay Constants ---
+SLIDES_JSON_PATH = 'segments/slides.json'
+FONT_PATH = 'circular-std-font-family/CircularStd-Book.ttf'
+TITLE_FONT_SIZE = 72
+BODY_FONT_SIZE = 36
+SLIDE_WIDTH = 1920
+SLIDE_HEIGHT = 1080
+LEFT_MARGIN = 80
+TOP_MARGIN = 120
+BULLET_SPACING = 44
+SUBTITLE_HEIGHT = 60
+BOTTOM_MARGIN = 80
 
 
 def upload_video_to_s3(video_path: str, filename: str) -> str:
@@ -228,6 +245,87 @@ def generate_audio_from_script(text: str, speed: float = 1.0, voice_id: str = "f
         f.write(audio_bytes)
     return filename, filepath
 
+# --- HeyGen Overlay Helper Functions ---
+def wrap_text(text, font, max_width, draw):
+    words = text.split()
+    lines = []
+    current_line = ''
+    for word in words:
+        test_line = current_line + (' ' if current_line else '') + word
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    return lines
+
+def calculate_empty_space(slide, title_font, body_font):
+    format_type = slide.get('format')
+    if format_type not in [2, 3]:
+        return None
+    title = slide.get('title', '')
+    bullets = slide.get('bullets', [])
+    max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
+    draw = ImageDraw.Draw(img)
+    y = TOP_MARGIN
+    title_lines = wrap_text(title, title_font, max_text_width, draw)
+    for line in title_lines:
+        y += title_font.size + 10
+    y += 120
+    for bullet in bullets:
+        bullet_lines = wrap_text(bullet, body_font, max_text_width, draw)
+        for line in bullet_lines:
+            y += body_font.size + 8
+        y += 24
+    bullets_end_y = y
+    subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
+    empty_space_top = bullets_end_y
+    empty_space_bottom = subtitle_y
+    empty_space_height = max(0, empty_space_bottom - empty_space_top)
+    if format_type == 2:
+        x = LEFT_MARGIN
+    else:
+        x = SLIDE_WIDTH // 2 + LEFT_MARGIN
+    width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    return {
+        'slide_number': slide.get('slide_number'),
+        'format': format_type,
+        'empty_space': {
+            'x': x,
+            'y': empty_space_top,
+            'width': width,
+            'height': empty_space_height
+        }
+    }
+
+def upload_file_to_s3(local_file_path, s3_key, bucket_name=None, acl='public-read'):
+    bucket = bucket_name or S3_BUCKET_NAME
+    s3 = boto3.client(
+        's3',
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+        region_name=AWS_DEFAULT_REGION
+    )
+    try:
+        s3.upload_file(local_file_path, bucket, s3_key, ExtraArgs={'ContentType': 'audio/mpeg'})
+        url = f'https://{bucket}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{s3_key}'
+        return url
+    except FileNotFoundError:
+        print(f"[S3] The file {local_file_path} was not found.")
+        return None
+    except NoCredentialsError:
+        print("[S3] AWS credentials not available.")
+        return None
+    except Exception as e:
+        print(f"[S3] Error uploading to S3: {e}")
+        return None
+
 app = FastAPI()
 
 app.add_middleware(
@@ -343,10 +441,246 @@ async def process_and_generate_video(
         video_gen.generate_video(segments_filepath, word_srt_filepath, filepath, output_video, 
                                show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
         print(f"[COMBINED API] Video generated successfully: {output_video}")
+        
+        # --- Calculate and save heygen_empty_spaces.json ---
+        try:
+            try:
+                title_font = ImageFont.truetype(FONT_PATH, TITLE_FONT_SIZE)
+                body_font = ImageFont.truetype(FONT_PATH, BODY_FONT_SIZE)
+            except Exception:
+                title_font = ImageFont.load_default()
+                body_font = ImageFont.load_default()
+            with open(SLIDES_JSON_PATH, 'r', encoding='utf-8') as f:
+                slides = json.load(f)
+            empty_spaces = []
+            for slide in slides:
+                result = calculate_empty_space(slide, title_font, body_font)
+                if result:
+                    empty_spaces.append(result)
+            with open('heygen_empty_spaces.json', 'w', encoding='utf-8') as f:
+                json.dump(empty_spaces, f, indent=2)
+            print(f"[COMBINED API] Identified empty spaces for {len(empty_spaces)} slides (formats 2 & 3). Saved to heygen_empty_spaces.json.")
+        except Exception as e:
+            print(f"[COMBINED API] Empty space detection failed: {e}")
+        
+        # --- Overlay HeyGen avatar videos in empty spaces ---
+        overlay_filename = None
+        try:
+            heygen_output_dir = 'heygen_videos'
+            os.makedirs(heygen_output_dir, exist_ok=True)
+            s3_links_path = os.path.join(heygen_output_dir, 's3_links.txt')
+            with open(s3_links_path, 'w') as f:
+                f.write('')
+            heygen_api_key = os.getenv('HEYGEN_API_KEY')
+            heygen_avatar_id = 'Jocelyn_sitting_office_side'
+            audio_file_path = filepath
+            with open('heygen_empty_spaces.json', 'r', encoding='utf-8') as f:
+                empty_spaces = json.load(f)
+            if not empty_spaces:
+                print("[COMBINED API] No empty spaces found for HeyGen overlays")
+                overlay_filename = None
+            else:
+                print(f"[COMBINED API] Found {len(empty_spaces)} slides for HeyGen avatar overlays")
+                segments_file = segments_filepath
+                with open(segments_file, 'r', encoding='utf-8') as f:
+                    segments_data = json.load(f)
+                segments = segments_data.get('segments', [])
+                if not heygen_api_key or heygen_api_key == 'YOUR_HEYGEN_API_KEY':
+                    print("[COMBINED API] HeyGen API key not configured, skipping avatar overlays")
+                    overlay_filename = None
+                elif not S3_BUCKET_NAME:
+                    print("[COMBINED API] S3 bucket not configured, skipping avatar overlays")
+                    overlay_filename = None
+                else:
+                    slide_segments = []
+                    for space in empty_spaces:
+                        slide_number = space.get('slide_number')
+                        segment = next((s for s in segments if s.get('segment_id') == slide_number), None)
+                        if not segment:
+                            continue
+                        slide_segments.append({
+                            'slide_number': slide_number,
+                            'start_time': segment.get('start_time', 0),
+                            'end_time': segment.get('end_time', 0),
+                            'empty_space': space['empty_space']
+                        })
+                    print(f"[COMBINED API] Generating HeyGen videos for {len(slide_segments)} slides...")
+                    for slide in slide_segments:
+                        slide_number = slide.get('slide_number')
+                        start_time = slide.get('start_time')
+                        end_time = slide.get('end_time')
+                        min_dim, max_dim = 128, 4096
+                        width = int(slide['empty_space']['width'])
+                        height = int(slide['empty_space']['height'])
+                        heygen_width = max(min_dim, min(width, max_dim))
+                        heygen_height = max(min_dim, min(height, max_dim))
+                        print(f"[COMBINED API] Extracting and uploading audio for slide {slide_number}...")
+                        audio = AudioSegment.from_file(audio_file_path)
+                        segment_audio = audio[start_time * 1000:end_time * 1000]
+                        segment_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_audio.mp3')
+                        segment_audio.export(segment_path, format='mp3')
+                        s3_key = f'heygen_segments/slide_{slide_number}_audio.mp3'
+                        s3_url = upload_file_to_s3(segment_path, s3_key, bucket_name=S3_BUCKET_NAME)
+                        if s3_url:
+                            with open(s3_links_path, 'a') as f:
+                                f.write(s3_url + '\n')
+                        if not s3_url:
+                            print(f"[COMBINED API] Failed to upload audio for slide {slide_number}")
+                            continue
+                        post_headers = {
+                            'Authorization': f'Bearer {heygen_api_key}',
+                            'Content-Type': 'application/json',
+                        }
+                        payload = {
+                            "video_inputs": [
+                                {
+                                    "character": {
+                                        "type": "avatar",
+                                        "avatar_id": heygen_avatar_id
+                                    },
+                                    "voice": {
+                                        "type": "audio",
+                                        "audio_url": s3_url
+                                    }
+                                }
+                            ]
+                        }
+                        try:
+                            resp = requests.post("https://api.heygen.com/v2/video/generate", json=payload, headers=post_headers)
+                            resp.raise_for_status()
+                            data = resp.json()
+                            video_id = data['data']['video_id']
+                            print(f'[COMBINED API] Video requested, id: {video_id}')
+                        except Exception as e:
+                            print(f'[COMBINED API] HeyGen API error for slide {slide_number}: {e}')
+                            continue
+                        status_url = f'https://api.heygen.com/v1/video_status.get?video_id={video_id}'
+                        get_headers = {
+                            'accept': 'application/json',
+                            'x-api-key': heygen_api_key,
+                        }
+                        time.sleep(5)
+                        poll_count = 0
+                        video_url = None
+                        while True:
+                            try:
+                                status_resp = requests.get(status_url, headers=get_headers)
+                                if status_resp.status_code == 404:
+                                    print(f'[{poll_count}] Video not found yet, retrying...')
+                                    time.sleep(3)
+                                    poll_count += 1
+                                    continue
+                                status_resp.raise_for_status()
+                                status_json = status_resp.json()
+                                print(f'[{poll_count}] Full response: {status_json}')
+                                status = status_json['data']['status']
+                                if status == 'completed':
+                                    video_url = status_json['data']['video_url']
+                                    print(f'[COMBINED API] Video ready at: {video_url}')
+                                    break
+                                elif status == 'failed':
+                                    print(f'[COMBINED API] HeyGen video generation failed for slide {slide_number}. Status response: {status_json}')
+                                    break
+                                print(f'[{poll_count}] Current status: {status}')
+                            except requests.exceptions.RequestException as e:
+                                print(f'Error polling status: {e}')
+                            time.sleep(5)
+                            poll_count += 1
+                        if not video_url:
+                            continue
+                        try:
+                            parsed_url = urlparse(video_url)
+                            base_name = os.path.basename(parsed_url.path)
+                            video_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen.mp4')
+                            with requests.get(video_url, stream=True) as r:
+                                r.raise_for_status()
+                                with open(video_path, 'wb') as f:
+                                    for chunk in r.iter_content(chunk_size=8192):
+                                        f.write(chunk)
+                            print(f'[COMBINED API] HeyGen video downloaded to: {video_path}')
+                        except Exception as e:
+                            print(f'[COMBINED API] Error downloading HeyGen video for slide {slide_number}: {e}')
+                            continue
+                        try:
+                            heygen_clip = VideoFileClip(video_path)
+                            noaudio_clip = heygen_clip.without_audio()
+                            noaudio_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio.mp4')
+                            noaudio_clip.write_videofile(noaudio_path, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+                            heygen_clip.close()
+                            noaudio_clip.close()
+                            resized_clip = VideoFileClip(noaudio_path)
+                            orig_w, orig_h = resized_clip.size
+                            target_w, target_h = width, height
+                            scale = min(target_w / orig_w, target_h / orig_h)
+                            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+                            resized_clip = resized_clip.resize((new_w, new_h))
+                            resized_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio_resized.mp4')
+                            resized_clip.write_videofile(resized_path, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+                            resized_clip.close()
+                            os.remove(noaudio_path)
+                        except Exception as e:
+                            print(f'[COMBINED API] Error processing HeyGen video for slide {slide_number}: {e}')
+                            continue
+                    print('[COMBINED API] Overlaying HeyGen videos on main video...')
+                    try:
+                        main_video = VideoFileClip(output_video)
+                        overlays = []
+                        for slide in slide_segments:
+                            slide_number = slide['slide_number']
+                            start = slide['start_time']
+                            end = slide['end_time']
+                            space = slide['empty_space']
+                            x = int(space['x'])
+                            y = int(space['y'])
+                            target_w = int(space['width'])
+                            target_h = int(space['height'])
+                            slide_format = slide.get('format', 2)
+                            heygen_vid_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio_resized.mp4')
+                            if not os.path.exists(heygen_vid_path):
+                                print(f'[COMBINED API] Warning: HeyGen video not found for slide {slide_number}, skipping overlay for this slide.')
+                                continue
+                            try:
+                                overlay_clip = VideoFileClip(heygen_vid_path)
+                                ow, oh = overlay_clip.size
+                                if slide_format == 2:
+                                    pos_x = x + (target_w - ow)
+                                else:
+                                    pos_x = x
+                                pos_y = y + (target_h - oh) // 2
+                                heygen_clip = overlay_clip.set_start(start).set_end(end).set_position((pos_x, pos_y))
+                                overlays.append(heygen_clip)
+                            except Exception as e:
+                                print(f'[COMBINED API] Error loading overlay for slide {slide_number}: {e}')
+                        if overlays:
+                            final = CompositeVideoClip([main_video] + overlays, size=main_video.size)
+                            overlay_output = os.path.join(UPLOAD_FOLDER, f"heygen_overlay_{video_name_clean}.mp4")
+                            final.write_videofile(overlay_output, codec='libx264', audio_codec='aac', fps=main_video.fps, threads=4, verbose=False, logger=None)
+                            final.close()
+                            overlay_filename = os.path.basename(overlay_output)
+                            print(f'[COMBINED API] Final video with HeyGen overlays saved: {overlay_output}')
+                        else:
+                            print('[COMBINED API] No HeyGen overlays to apply.')
+                            overlay_filename = None
+                        main_video.close()
+                    except Exception as e:
+                        print(f'[COMBINED API] Error during HeyGen overlay: {e}')
+                        overlay_filename = None
+        except Exception as e:
+            print(f"[COMBINED API] HeyGen overlay step failed: {e}")
+            overlay_filename = None
+        
         # Upload to S3 using put_object
         filename = os.path.basename(output_video)
         s3_url = upload_video_to_s3(output_video, filename)
-        return {"success": True, "video_filename": filename, "s3_url": s3_url, "message": "Complete video generated and uploaded successfully"}
+        
+        return JSONResponse({
+            'success': True,
+            'video_filename': filename,
+            'overlay_video_filename': overlay_filename,
+            'overlay_video_preview_url': f"/download_video/{overlay_filename}" if overlay_filename else None,
+            's3_url': s3_url,
+            'message': 'Complete video generated successfully'
+        })
     except Exception as e:
         print(f"[COMBINED API ERROR] Process failed: {e}")
         return JSONResponse({"error": str(e)}, status_code=500) 
