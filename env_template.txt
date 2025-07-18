@@ -1,0 +1,30 @@
+# VideoGen2 Environment Variables for Modal Deployment
+# Copy this content to your Modal secrets or create a .env file locally
+
+# OpenAI API Key (for transcript correction and GPT processing)
+OPENAI_API_KEY=your_openai_api_key_here
+
+# ElevenLabs API Key (for text-to-speech audio generation)
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+ELEVENLABS_VOICE_ID=ftDdhfYtmfGP0tFlBYA1
+
+# AWS S3 Configuration (for video uploads)
+AWS_ACCESS_KEY_ID=your_aws_access_key_id_here
+AWS_SECRET_ACCESS_KEY=your_aws_secret_access_key_here
+AWS_DEFAULT_REGION=us-east-1
+S3_BUCKET_NAME=your_s3_bucket_name_here
+
+# Ideogram API Key (for image generation)
+IDEOGRAM_API_KEY=your_ideogram_api_key_here
+
+# Optional: Custom voice settings (you can adjust these)
+# ELEVENLABS_VOICE_ID=ftDdhfYtmfGP0tFlBYA1
+# Voice stability and similarity boost settings
+# STABILITY=0.35
+# SIMILARITY_BOOST=0.40
+
+# Optional: AWS S3 region (change if needed)
+# AWS_DEFAULT_REGION=us-west-2
+
+# Optional: Custom S3 bucket name
+# S3_BUCKET_NAME=videogen2-videos 

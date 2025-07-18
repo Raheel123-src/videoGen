@@ -10,7 +10,6 @@ from moviepy.video.fx.all import resize
 import numpy as np
 import random
 from glob import glob
-import subprocess
 import sys
 
 # Utility: always flush stdout after print
@@ -27,9 +26,9 @@ class VideoGenerator:
         self.font_path = os.path.join(font_folder, "CircularStd-Book.ttf")
         self.bold_font_path = os.path.join("circular-std-font-family", "CircularStd-Bold.ttf")
         
-        # Video settings - optimized for speed
-        self.width = 1920
-        self.height = 1080
+        # Video settings - optimized for CPU-only processing
+        self.width = 1280  # Reduced from 1920 for CPU efficiency
+        self.height = 720   # Reduced from 1080 for CPU efficiency
         self.fps = 24  # Reduced from 30 for speed
         self.background_color = (255, 255, 255)  # White
         self.text_color = (0, 0, 0)  # Black
