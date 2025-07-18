@@ -4,8 +4,7 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install_from_requirements("requirements.txt")
-    .pip_install("moviepy>=1.0.0", "numpy>=1.21.0", "Pillow>=9.0.0", "decorator>=4.0.0", "imageio>=2.5", "imageio-ffmpeg>=0.4.0", "proglog>=0.1.9")
-    .run_commands("pip3 install moviepy>=1.0.0 numpy>=1.21.0 Pillow>=9.0.0 decorator>=4.0.0 imageio>=2.5 imageio-ffmpeg>=0.4.0 proglog>=0.1.9")
+    .pip_install("python-multipart>=0.0.5", "moviepy==1.0.3")
     .apt_install("ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "libsm6", "libxext6", "libxrender-dev")
     .env({"PYTHONUNBUFFERED": "1"})
     .add_local_file("mainModel.py", "/root/mainModel.py", copy=True)
@@ -27,10 +26,7 @@ app = modal.App("videogen2-fastapi", image=image)
 # Expose the FastAPI app as a web endpoint
 @app.function(
     secrets=[
-        modal.Secret.from_name("openai-api-key"),
-        modal.Secret.from_name("elevenlabs-api-key"),
-        modal.Secret.from_name("ideogram-api-key"),
-        modal.Secret.from_name("aws-credentials"),
+        modal.Secret.from_name("VideoGenSecret"),
     ],
     timeout=600,
     scaledown_window=300,
