@@ -4,6 +4,7 @@ import modal
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install_from_requirements("requirements.txt")
+    .apt_install("ffmpeg", "libgl1-mesa-glx", "libglib2.0-0", "libsm6", "libxext6", "libxrender-dev")
     .env({"PYTHONUNBUFFERED": "1"})
 )
 
@@ -29,10 +30,11 @@ mounts = [
     secrets=[modal.Secret.from_dotenv()],
     timeout=600,
     container_idle_timeout=300,
+    gpu="T4",  # Add GPU for faster video processing
 )
 @modal.asgi_app()
 def fastapi_app():
     import sys
     sys.path.append("/root")
     from mainModel import app
-    return app
+    return app 

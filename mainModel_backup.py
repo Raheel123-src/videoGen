@@ -13,18 +13,16 @@ from pydub import AudioSegment
 import json
 from video_generator import VideoGenerator
 import sys
+import subprocess
 from urllib.parse import urlparse
 import boto3
 from botocore.exceptions import BotoCoreError, NoCredentialsError
 from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
-
+import cv2
 from openai import OpenAI
 import difflib
-import concurrent.futures
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load environment variables
 load_dotenv()
@@ -47,7 +45,7 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 
-# Constants
+# --- HeyGen Overlay Constants ---
 SLIDES_JSON_PATH = 'segments/slides.json'
 FONT_PATH = 'circular-std-font-family/CircularStd-Book.ttf'
 TITLE_FONT_SIZE = 72
@@ -59,6 +57,79 @@ TOP_MARGIN = 120
 BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
 BOTTOM_MARGIN = 80
+
+# Face detection cascade classifier
+face_cascade = None
+
+def get_face_cascade():
+    global face_cascade
+    if face_cascade is None:
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    return face_cascade
+
+def detect_face_in_video(video_path):
+    """Detect faces in video and return face information"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        face_cascade = get_face_cascade()
+        
+        # Read first frame
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            return None
+        
+        # Convert to grayscale for face detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Detect faces
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        cap.release()
+        
+        if len(faces) > 0:
+            # Return the largest face (assumed to be the main subject)
+            largest_face = max(faces, key=lambda x: x[2] * x[3])
+            x, y, w, h = largest_face
+            return {
+                'x': int(x),
+                'y': int(y),
+                'width': int(w),
+                'height': int(h),
+                'center_x': int(x + w/2),
+                'center_y': int(y + h/2)
+            }
+        return None
+    except Exception as e:
+        print(f"Error detecting face: {e}")
+        return None
+
+def create_circular_face_crop(frame, face_info):
+    """Create a circular crop around the detected face"""
+    try:
+        x, y, w, h = face_info['x'], face_info['y'], face_info['width'], face_info['height']
+        center_x, center_y = face_info['center_x'], face_info['center_y']
+        
+        # Create a mask for circular crop
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        radius = min(w, h) // 2
+        cv2.circle(mask, (center_x, center_y), radius, 255, -1)
+        
+        # Apply mask to frame
+        masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+        
+        # Crop to face region
+        crop_x1 = max(0, center_x - radius)
+        crop_y1 = max(0, center_y - radius)
+        crop_x2 = min(frame.shape[1], center_x + radius)
+        crop_y2 = min(frame.shape[0], center_y + radius)
+        
+        cropped = masked_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        
+        return cropped
+    except Exception as e:
+        print(f"Error creating circular crop: {e}")
+        return frame
 
 def upload_video_to_s3(video_path: str, filename: str) -> str:
     """Upload video to S3 and return the URL"""
@@ -175,54 +246,13 @@ def transcribe_audio(audio_path):
         raise Exception(f"Error transcribing audio: {str(e)}")
 
 def create_audio_segments(sentence_segments, segment_duration=15):
-    """
-    Create audio segments with smart logic to avoid very short final segments.
-    If the remaining time is less than 10 seconds, merge it with the previous segment.
-    """
     if not sentence_segments:
         return []
-    
     total_duration = sentence_segments[-1]['end']
     segments = []
     segment_start = 0
-    
     while segment_start < total_duration:
-        # Calculate the end time for this segment
         segment_end = min(segment_start + segment_duration, total_duration)
-        
-        # Check if this would be the last segment and if it's too short
-        remaining_time = total_duration - segment_start
-        
-        # If remaining time is less than 10 seconds and we already have segments,
-        # merge the remaining content with the last segment instead of creating a new one
-        if remaining_time < 10 and segments:
-            print(f"[DEBUG] Remaining time ({remaining_time:.1f}s) is less than 10s, merging with previous segment")
-            # Extend the last segment to include all remaining content
-            last_segment = segments[-1]
-            last_segment['end'] = total_duration
-            
-            # Add remaining text to the last segment
-            remaining_text = ""
-            for sentence in sentence_segments:
-                sentence_start = sentence['start']
-                sentence_end = sentence['end']
-                if (sentence_start >= segment_start and sentence_end <= total_duration):
-                    if remaining_text:
-                        remaining_text += " " + sentence['text']
-                    else:
-                        remaining_text = sentence['text']
-            
-            if remaining_text.strip():
-                if last_segment['text']:
-                    last_segment['text'] += " " + remaining_text.strip()
-                else:
-                    last_segment['text'] = remaining_text.strip()
-            
-            # Update sentences list for the last segment
-            last_segment['sentences'] = [s for s in sentence_segments if s['start'] < total_duration and s['end'] > last_segment['start']]
-            break
-        
-        # Normal segment creation
         segment_text = ""
         for sentence in sentence_segments:
             sentence_start = sentence['start']
@@ -232,7 +262,6 @@ def create_audio_segments(sentence_segments, segment_duration=15):
                     segment_text += " " + sentence['text']
                 else:
                     segment_text = sentence['text']
-        
         if segment_text.strip():
             segments.append({
                 'start': segment_start,
@@ -240,15 +269,7 @@ def create_audio_segments(sentence_segments, segment_duration=15):
                 'text': segment_text.strip(),
                 'sentences': [s for s in sentence_segments if s['start'] < segment_end and s['end'] > segment_start]
             })
-        
         segment_start = segment_end
-    
-    # Log segment information
-    print(f"[DEBUG] Created {len(segments)} segments:")
-    for i, seg in enumerate(segments):
-        duration = seg['end'] - seg['start']
-        print(f"[DEBUG] Segment {i+1}: {seg['start']:.1f}s - {seg['end']:.1f}s (duration: {duration:.1f}s)")
-    
     return segments
 
 def format_time(seconds):
@@ -370,7 +391,45 @@ def wrap_text(text, font, max_width, draw):
         lines.append(current_line)
     return lines
 
-
+def calculate_empty_space(slide, title_font, body_font):
+    format_type = slide.get('format')
+    if format_type not in [2, 3]:
+        return None
+    title = slide.get('title', '')
+    bullets = slide.get('bullets', [])
+    max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
+    draw = ImageDraw.Draw(img)
+    y = TOP_MARGIN
+    title_lines = wrap_text(title, title_font, max_text_width, draw)
+    for line in title_lines:
+        y += title_font.size + 10
+    y += 120
+    for bullet in bullets:
+        bullet_lines = wrap_text(bullet, body_font, max_text_width, draw)
+        for line in bullet_lines:
+            y += body_font.size + 8
+        y += 24
+    bullets_end_y = y
+    subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
+    empty_space_top = bullets_end_y
+    empty_space_bottom = subtitle_y
+    empty_space_height = max(0, empty_space_bottom - empty_space_top)
+    if format_type == 2:
+        x = LEFT_MARGIN
+    else:
+        x = SLIDE_WIDTH // 2 + LEFT_MARGIN
+    width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    return {
+        'slide_number': slide.get('slide_number'),
+        'format': format_type,
+        'empty_space': {
+            'x': x,
+            'y': empty_space_top,
+            'width': width,
+            'height': empty_space_height
+        }
+    }
 
 def upload_file_to_s3(local_file_path, s3_key, bucket_name=None, acl='public-read'):
     bucket = bucket_name or S3_BUCKET_NAME
@@ -497,173 +556,19 @@ Title: {segment_title or f"Slide {segment_index+1}"}
 # Function to create slides.json from segments
 
 def create_slides_json_from_segments(segments, slides_json_path):
-    """Create slides.json from pre-created segments"""
     slides = []
     total_segments = len(segments)
     previous_format = None
-    
-    print(f"[DEBUG] Creating {total_segments} slides from segments")
-    
     for i, segment in enumerate(segments):
         percent = int((i+1)/total_segments*100)
-        duration = segment['end'] - segment['start']
-        print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s", flush=True)
-        slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format)
+        print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%)", flush=True)
+        slide_json = generate_slide_json_content(segment['text'], i, segment['end'] - segment['start'], previous_format=previous_format)
         previous_format = slide_json.get('format', previous_format)
         slides.append(slide_json)
-    
-    print(f"[DEBUG] Created {len(slides)} slides from segments")
-    
     with open(slides_json_path, 'w', encoding='utf-8') as f:
         import json
         json.dump(slides, f, indent=2, ensure_ascii=False)
     print(f"Slides JSON saved: {slides_json_path}")
-
-def parse_srt_to_segments(srt_content):
-    """Parse SRT content back into segments for slide generation"""
-    import re
-    segments = []
-    lines = srt_content.strip().split('\n')
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line or not line.isdigit():
-            i += 1
-            continue
-        
-        # Skip the sequence number
-        i += 1
-        if i >= len(lines):
-            break
-            
-        # Parse timestamp
-        if i < len(lines):
-            timestamp_line = lines[i].strip()
-            if ' --> ' in timestamp_line:
-                start_time_str, end_time_str = timestamp_line.split(' --> ')
-                start_time = parse_timestamp_to_seconds(start_time_str)
-                end_time = parse_timestamp_to_seconds(end_time_str)
-            else:
-                i += 1
-                continue
-        else:
-            break
-            
-        i += 1
-        
-        # Collect text lines
-        text_lines = []
-        while i < len(lines) and lines[i].strip():
-            text_lines.append(lines[i].strip())
-            i += 1
-            
-        if text_lines:
-            # Remove HTML tags from text
-            text = ' '.join(text_lines)
-            text = re.sub(r'<[^>]+>', '', text)  # Remove HTML tags like <b>
-            text = text.strip()
-            
-            if text:
-                segments.append({
-                    'start': start_time,
-                    'end': end_time,
-                    'text': text
-                })
-        
-        i += 1  # Skip empty line
-    
-    return segments
-
-def parse_timestamp_to_seconds(timestamp):
-    """Convert SRT timestamp (HH:MM:SS,mmm) to seconds"""
-    try:
-        time_part, ms_part = timestamp.split(',')
-        h, m, s = map(int, time_part.split(':'))
-        ms = int(ms_part)
-        return h * 3600 + m * 60 + s + ms / 1000.0
-    except:
-        return 0.0
-
-def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path):
-    """Create slides.json from corrected SRT content with smart segment logic"""
-    print("[DEBUG] Creating slides from corrected SRT content...")
-    
-    # Parse the corrected SRT back into segments
-    corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
-    print(f"[DEBUG] Parsed {len(corrected_segments)} segments from corrected SRT")
-    
-    if not corrected_segments:
-        print("[WARNING] No segments found in corrected SRT")
-        return
-        
-    total_duration = corrected_segments[-1]['end']
-    slides = []
-    segment_start = 0
-    segment_index = 0
-    previous_format = None
-    
-    while segment_start < total_duration:
-        # Calculate the end time for this segment
-        segment_end = min(segment_start + 15, total_duration)
-        
-        # Check if this would be the last segment and if it's too short
-        remaining_time = total_duration - segment_start
-        
-        # If remaining time is less than 10 seconds and we already have slides,
-        # merge the remaining content with the last slide instead of creating a new one
-        if remaining_time < 10 and slides:
-            print(f"[DEBUG] Remaining time ({remaining_time:.1f}s) is less than 10s, merging with previous slide")
-            # Extend the last slide to include all remaining content
-            last_slide = slides[-1]
-            
-            # Add remaining text to the last slide
-            remaining_text = ""
-            for sentence in corrected_segments:
-                sentence_start = sentence['start']
-                sentence_end = sentence['end']
-                if (sentence_start >= segment_start and sentence_end <= total_duration):
-                    if remaining_text:
-                        remaining_text += " " + sentence['text']
-                    else:
-                        remaining_text = sentence['text']
-            
-            if remaining_text.strip():
-                # Update the slide content with merged text
-                merged_text = last_slide.get('text', '') + " " + remaining_text.strip()
-                print(f"Generating updated slide JSON for merged segment {segment_index} (extended duration)")
-                updated_slide_json = generate_slide_json_content(merged_text.strip(), segment_index-1, total_duration - last_slide.get('start_time', segment_start-15), previous_format=previous_format)
-                
-                # Update the last slide with new content
-                slides[-1] = updated_slide_json
-            break
-        
-        # Normal slide creation
-        segment_text = ""
-        for sentence in corrected_segments:
-            sentence_start = sentence['start']
-            sentence_end = sentence['end']
-            if (sentence_start < segment_end and sentence_end > segment_start):
-                if segment_text:
-                    segment_text += " " + sentence['text']
-                else:
-                    segment_text = sentence['text']
-        
-        if segment_text.strip():
-            print(f"Generating slide JSON for corrected segment {segment_index+1} ({segment_start:.1f}s - {segment_end:.1f}s)")
-            slide_json = generate_slide_json_content(segment_text.strip(), segment_index, segment_end - segment_start, previous_format=previous_format)
-            previous_format = slide_json.get('format', previous_format)
-            slides.append(slide_json)
-            segment_index += 1
-            
-        segment_start = segment_end
-    
-    # Log slide information
-    print(f"[DEBUG] Created {len(slides)} slides from corrected SRT")
-    
-    with open(slides_json_path, 'w', encoding='utf-8') as f:
-        import json
-        json.dump(slides, f, indent=2, ensure_ascii=False)
-    print(f"Slides JSON saved from corrected SRT: {slides_json_path}")
 
 def extract_proper_nouns(script):
     import re
@@ -692,191 +597,6 @@ def correct_proper_nouns_in_transcript(proper_nouns, sentence_segments, word_seg
     print(f"[DEBUG] Word segments after correction: {word_segments}")
     print(f"[DEBUG] Sentence segments after correction: {sentence_segments}")
     return sentence_segments, word_segments
-
-# Image generation functions (integrated from generate_images_ideogram_optimized.py)
-def generate_image_ideogram_optimized(prompt, aspect_ratio, slide_number):
-    """Generate image using Ideogram 3.0 with optimized settings"""
-    IDEOGRAM_API_KEY = os.getenv('IDEOGRAM_API_KEY')
-    
-    print(f"🎨 Generating image for slide {slide_number}...")
-    
-    try:
-        # Optimized API call with faster settings
-        response = requests.post(
-            "https://api.ideogram.ai/v1/ideogram-v3/generate",
-            headers={
-                "Api-Key": IDEOGRAM_API_KEY,
-                "Content-Type": "application/json"
-            },
-            json={
-                "prompt": prompt,
-                "rendering_speed": "TURBO",  # Fastest rendering
-                "aspect_ratio": aspect_ratio,
-                "quality": "standard"  # Faster than high quality
-            },
-            timeout=30  # Reduced timeout for faster failure detection
-        )
-        
-        response.raise_for_status()
-        result = response.json()
-        
-        # Get the image URL from the response
-        image_url = result['data'][0]['url']
-        print(f"✅ Image generated for slide {slide_number}")
-        
-        # Download the image with optimized settings
-        image_response = requests.get(
-            image_url, 
-            timeout=15,  # Faster timeout
-            stream=True  # Stream for better memory management
-        )
-        image_response.raise_for_status()
-        image_bytes = image_response.content
-        
-        return image_bytes, slide_number
-        
-    except Exception as e:
-        print(f"❌ Error generating image for slide {slide_number}: {e}")
-        return None, slide_number
-
-def save_image_optimized(image_data, slide_info):
-    """Save image bytes to file with progress tracking"""
-    image_bytes, slide_number = image_data
-    if image_bytes is None:
-        return False, slide_number
-    
-    try:
-        # Get format type from slide info
-        format_type = slide_info.get('format', 2)
-        filename = f"generated_images_ideogram/slide_{slide_number}_format_{format_type}.png"
-        
-        with open(filename, 'wb') as f:
-            f.write(image_bytes)
-        
-        print(f"💾 Saved: {filename}")
-        return True, slide_number
-        
-    except Exception as e:
-        print(f"❌ Error saving image for slide {slide_number}: {e}")
-        return False, slide_number
-
-def process_slide_parallel(slide):
-    """Process a single slide with image generation"""
-    slide_number = slide['slide_number']
-    format_type = slide['format']
-    image_prompt = slide.get('image_prompt')
-    
-    # Skip slides without image prompts
-    if not image_prompt:
-        print(f"⏭️ Skipping slide {slide_number} (format {format_type}) - no image prompt")
-        return None
-    
-    # Determine aspect ratio based on format
-    if format_type in [2, 3]:
-        aspect_ratio = "1x1"  # Square for formats 2 and 3
-    elif format_type == 4:
-        aspect_ratio = "16x9"  # Landscape for format 4
-    else:
-        print(f"⏭️ Skipping slide {slide_number} (format {format_type}) - no image needed")
-        return None
-    
-    # Generate image
-    image_data = generate_image_ideogram_optimized(image_prompt, aspect_ratio, slide_number)
-    
-    if image_data[0]:
-        # Save image
-        success, _ = save_image_optimized(image_data, slide)
-        if success:
-            print(f"✅ Slide {slide_number} completed")
-        else:
-            print(f"❌ Slide {slide_number} failed")
-        return success
-    else:
-        print(f"❌ Slide {slide_number} failed")
-        return False
-
-def generate_images_from_slides():
-    """Generate images for all slides that need them"""
-    # Check if API key is available
-    IDEOGRAM_API_KEY = os.getenv('IDEOGRAM_API_KEY')
-    if not IDEOGRAM_API_KEY:
-        print("❌ Error: IDEOGRAM_API_KEY not found in .env file")
-        print("Please add your Ideogram API key to the .env file:")
-        print("IDEOGRAM_API_KEY=your_api_key_here")
-        return False
-    
-    # Load slides.json
-    try:
-        with open('segments/slides.json', 'r', encoding='utf-8') as f:
-            slides = json.load(f)
-    except FileNotFoundError:
-        print("❌ Error: segments/slides.json not found")
-        return False
-    
-    # Create images directory if it doesn't exist
-    os.makedirs('generated_images_ideogram', exist_ok=True)
-    
-    # Filter slides that need images
-    slides_with_images = [slide for slide in slides if slide.get('image_prompt')]
-    total_images = len(slides_with_images)
-    
-    print(f"🚀 Starting optimized image generation for {total_images} slides")
-    print(f"⚡ Using parallel processing for faster generation")
-    print("=" * 60)
-    
-    # Use ThreadPoolExecutor for parallel processing
-    # Limit to 4 concurrent requests to avoid overwhelming the API
-    max_workers = min(4, total_images)
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_slide = {
-            executor.submit(process_slide_parallel, slide): slide 
-            for slide in slides_with_images
-        }
-        
-        # Process completed tasks
-        for future in as_completed(future_to_slide):
-            slide = future_to_slide[future]
-            try:
-                result = future.result()
-                if result:
-                    print(f"✅ Completed: Slide {slide['slide_number']}")
-                else:
-                    print(f"❌ Failed: Slide {slide['slide_number']}")
-            except Exception as e:
-                print(f"❌ Exception for slide {slide['slide_number']}: {e}")
-    
-    print(f"\n🎉 Image generation complete!")
-    print(f"📁 Check the 'generated_images_ideogram' folder for all generated images.")
-    return True
-
-# Highlight functions (integrated from gpt_highlight_bullets.py)
-def add_highlights_to_slides(slides_json_path='segments/slides.json'):
-    """Add highlights to slides (dummy logic for now)"""
-    try:
-        with open(slides_json_path, 'r', encoding='utf-8') as f:
-            slides = json.load(f)
-        
-        # Dummy highlight logic for now: highlight the first word in the first bullet of each slide
-        for slide in slides:
-            bullets = slide.get('bullets', [])
-            for i, bullet in enumerate(bullets):
-                if '<highlight>' not in bullet and i == 0:
-                    words = bullet.split()
-                    if len(words) > 1:
-                        words[1] = f'<highlight>{words[1]}</highlight>'
-                        bullets[i] = ' '.join(words)
-            slide['bullets'] = bullets
-        
-        with open(slides_json_path, 'w', encoding='utf-8') as f:
-            json.dump(slides, f, ensure_ascii=False, indent=2)
-        
-        print('[DEBUG] Slides updated with highlights.')
-        return True
-    except Exception as e:
-        print(f'[ERROR] Failed to add highlights: {e}')
-        return False
 
 def gpt_refactor_transcripts(script, sentence_segments, word_segments):
     client = get_openai_client()
@@ -1088,21 +808,6 @@ async def process_and_generate_video(
                 f.write(corrected_sentence_srt)
             with open(word_srt_filepath, 'w', encoding='utf-8') as f:
                 f.write(corrected_word_srt)
-        
-        # --- Ensure slides.json is generated ---
-        slides_json_path = os.path.join(SEGMENTS_FOLDER, 'slides.json')
-        
-        # If GPT correction was used, create slides from corrected SRT
-        if (audio_file or audio_url) and script:
-            print("[DEBUG] Creating slides from GPT-corrected SRT content...")
-            create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path)
-        else:
-            # Use original transcription for slides
-            print("[DEBUG] Creating slides from original transcription...")
-            audio_segments = create_audio_segments(sentence_segments, 15)
-            create_slides_json_from_segments(audio_segments, slides_json_path)
-        
-        # Create segments.json for video generation (always use original segments for timing)
         audio_segments = create_audio_segments(sentence_segments, 15)
         segments_filename = f"{base_filename}_segments.json"
         segments_filepath = os.path.join(SEGMENTS_FOLDER, segments_filename)
@@ -1120,23 +825,22 @@ async def process_and_generate_video(
         }
         with open(segments_filepath, 'w', encoding='utf-8') as f:
             json.dump(segments_data, f, indent=2, ensure_ascii=False)
+        # --- Ensure slides.json is generated ---
+        slides_json_path = os.path.join(SEGMENTS_FOLDER, 'slides.json')
+        create_slides_json_from_segments(audio_segments, slides_json_path)
         print(f"[COMBINED API] Audio processing completed")
         print(f"[COMBINED API] Generating images with optimized parallel processing...")
         try:
-            success = generate_images_from_slides()
-            if success:
-                print(f"[COMBINED API] Image generation completed with optimization")
-            else:
-                print(f"[COMBINED API] Image generation failed")
+            result = subprocess.run([sys.executable, 'generate_images_ideogram_optimized.py'], 
+                                 capture_output=True, text=True, check=True)
+            print(f"[COMBINED API] Image generation completed with optimization")
         except Exception as e:
             print(f"[COMBINED API] Image generation failed: {e}")
         print(f"[COMBINED API] Adding highlights...")
         try:
-            success = add_highlights_to_slides('segments/slides.json')
-            if success:
-                print(f"[COMBINED API] Highlights added")
-            else:
-                print(f"[COMBINED API] Highlight addition failed")
+            result = subprocess.run([sys.executable, 'gpt_highlight_bullets.py', 'segments/slides.json'], 
+                                 capture_output=True, text=True, check=True)
+            print(f"[COMBINED API] Highlights added")
         except Exception as e:
             print(f"[COMBINED API] Highlight script failed: {e}")
         print(f"[COMBINED API] Generating video...")
@@ -1158,6 +862,217 @@ async def process_and_generate_video(
                                show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
         print(f"[COMBINED API] Video generated successfully: {output_video}")
         
+        # --- Calculate and save heygen_empty_spaces.json ---
+        # try:
+        #     try:
+        #         title_font = ImageFont.truetype(FONT_PATH, TITLE_FONT_SIZE)
+        #         body_font = ImageFont.truetype(FONT_PATH, BODY_FONT_SIZE)
+        #     except Exception:
+        #         title_font = ImageFont.load_default()
+        #         body_font = ImageFont.load_default()
+        #     with open(SLIDES_JSON_PATH, 'r', encoding='utf-8') as f:
+        #         slides = json.load(f)
+        #     empty_spaces = []
+        #     for slide in slides:
+        #         result = calculate_empty_space(slide, title_font, body_font)
+        #         if result:
+        #             empty_spaces.append(result)
+        #     with open('heygen_empty_spaces.json', 'w', encoding='utf-8') as f:
+        #         json.dump(empty_spaces, f, indent=2)
+        #     print(f"[COMBINED API] Identified empty spaces for {len(empty_spaces)} slides (formats 2 & 3). Saved to heygen_empty_spaces.json.")
+        # except Exception as e:
+        #     print(f"[COMBINED API] Empty space detection failed: {e}")
+        
+        # --- Overlay HeyGen avatar videos in empty spaces ---
+        # TEMPORARILY DISABLED: HeyGen overlay video generation
+        overlay_filename = None
+        # try:
+        #     heygen_output_dir = 'heygen_videos'
+        #     os.makedirs(heygen_output_dir, exist_ok=True)
+        #     s3_links_path = os.path.join(heygen_output_dir, 's3_links.txt')
+        #     with open(s3_links_path, 'w') as f:
+        #         f.write('')
+        #     heygen_api_key = os.getenv('HEYGEN_API_KEY')
+        #     heygen_avatar_id = 'Jocelyn_sitting_office_side'
+        #     audio_file_path = filepath
+        #     with open('heygen_empty_spaces.json', 'r', encoding='utf-8') as f:
+        #         empty_spaces = json.load(f)
+        #     if not empty_spaces:
+        #         print("[COMBINED API] No empty spaces found for HeyGen overlays")
+        #         overlay_filename = None
+        #     else:
+        #         print(f"[COMBINED API] Found {len(empty_spaces)} slides for HeyGen avatar overlays")
+        #         segments_file = segments_filepath
+        #         with open(segments_file, 'r', encoding='utf-8') as f:
+        #             segments_data = json.load(f)
+        #         segments = segments_data.get('segments', [])
+        #         if not heygen_api_key or heygen_api_key == 'YOUR_HEYGEN_API_KEY':
+        #             print("[COMBINED API] HeyGen API key not configured, skipping avatar overlays")
+        #             overlay_filename = None
+        #         elif not S3_BUCKET_NAME:
+        #             print("[COMBINED API] S3 bucket not configured, skipping avatar overlays")
+        #             overlay_filename = None
+        #         else:
+        #             slide_segments = []
+        #             for space in empty_spaces:
+        #                 slide_number = space.get('slide_number')
+        #                 segment = next((s for s in segments if s.get('segment_id') == slide_number), None)
+        #                 if not segment:
+        #                     continue
+        #                 slide_segments.append({
+        #                     'slide_number': slide_number,
+        #                     'start_time': segment.get('start_time', 0),
+        #                     'end_time': segment.get('end_time', 0),
+        #                     'empty_space': space['empty_space']
+        #                 })
+        #             print(f"[COMBINED API] Generating HeyGen videos for {len(slide_segments)} slides...")
+        #             for slide in slide_segments:
+        #                 slide_number = slide.get('slide_number')
+        #                 start_time = slide.get('start_time')
+        #                 end_time = slide.get('end_time')
+        #                 min_dim, max_dim = 128, 4096
+        #                 width = int(slide['empty_space']['width'])
+        #                 height = int(slide['empty_space']['height'])
+        #                 heygen_width = max(min_dim, min(width, max_dim))
+        #                 heygen_height = max(min_dim, min(height, max_dim))
+        #                 print(f"[COMBINED API] Extracting and uploading audio for slide {slide_number}...")
+        #                 audio = AudioSegment.from_file(audio_file_path)
+        #                 segment_audio = audio[start_time * 1000:end_time * 1000]
+        #                 segment_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_audio.mp3')
+        #                 segment_audio.export(segment_path, format='mp3')
+        #                 s3_key = f'heygen_segments/slide_{slide_number}_audio.mp3'
+        #                 s3_url = upload_file_to_s3(segment_path, s3_key, bucket_name=S3_BUCKET_NAME)
+        #                 if s3_url:
+        #                     with open(s3_links_path, 'a') as f:
+        #                         f.write(s3_url + '\n')
+        #                 if not s3_url:
+        #                     print(f"[COMBINED API] Failed to upload audio for slide {slide_number}")
+        #                     continue
+        #                 post_headers = {
+        #                     'Authorization': f'Bearer {heygen_api_key}',
+        #                     'Content-Type': 'application/json',
+        #                 }
+        #                 payload = {
+        #                     "video_inputs": [
+        #                         {
+        #                             "character": {
+        #                                 "type": "avatar",
+        #                                 "avatar_id": heygen_avatar_id
+        #                             },
+        #                             "voice": {
+        #                                 "type": "audio",
+        #                                 "audio_url": s3_url
+        #                             }
+        #                         }
+        #                     ]
+        #                 }
+        #                 try:
+        #                     resp = requests.post("https://api.heygen.com/v2/video/generate", json=payload, headers=post_headers)
+        #                     resp.raise_for_status()
+        #                     data = resp.json()
+        #                     video_id = data['data']['video_id']
+        #                     print(f'[COMBINED API] Video requested, id: {video_id}')
+        #                 except Exception as e:
+        #                     print(f'[COMBINED API] HeyGen API error for slide {slide_number}: {e}')
+        #                     continue
+        #                 status_url = f'https://api.heygen.com/v1/video_status.get?video_id={video_id}'
+        #                 get_headers = {
+        #                     'accept': 'application/json',
+        #                     'x-api-key': heygen_api_key,
+        #                 }
+        #                 time.sleep(5)
+        #                 poll_count = 0
+        #                 video_url = None
+        #                 while True:
+        #                     try:
+        #                         status_resp = requests.get(status_url, headers=get_headers)
+        #                         if status_resp.status_code == 404:
+        #                             print(f'[{poll_count}] Video not found yet, retrying...')
+        #                             time.sleep(3)
+        #                             poll_count += 1
+        #                             continue
+        #                         status_resp.raise_for_status()
+        #                         status_json = status_resp.json()
+        #                         print(f'[{poll_count}] Full response: {status_json}')
+        #                         status = status_json['data']['status']
+        #                         if status == 'completed':
+        #                             video_url = status_json['data']['video_url']
+        #                             print(f'[COMBINED API] Video ready at: {video_url}')
+        #                             break
+        #                         elif status == 'failed':
+        #                             print(f'[COMBINED API] HeyGen video generation failed for slide {slide_number}. Status response: {status_json}')
+        #                             break
+        #                         print(f'[{poll_count}] Current status: {status}')
+        #                     except requests.exceptions.RequestException as e:
+        #                         print(f'Error polling status: {e}')
+        #                     time.sleep(5)
+        #                     poll_count += 1
+        #                 if not video_url:
+        #                     continue
+        #                 try:
+        #                     parsed_url = urlparse(video_url)
+        #                     base_name = os.path.basename(parsed_url.path)
+        #                     video_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen.mp4')
+        #                     with requests.get(video_url, stream=True) as r:
+        #                         r.raise_for_status()
+        #                         with open(video_path, 'wb') as f:
+        #                             for chunk in r.iter_content(chunk_size=8192):
+        #                                 f.write(chunk)
+        #                     print(f'[COMBINED API] HeyGen video downloaded to: {video_path}')
+        #                 except Exception as e:
+        #                     print(f'[COMBINED API] Error downloading HeyGen video for slide {slide_number}: {e}')
+        #                     continue
+        #                 try:
+        #                     heygen_clip = VideoFileClip(video_path)
+        #                     noaudio_clip = heygen_clip.without_audio()
+        #                     noaudio_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio.mp4')
+        #                     noaudio_clip.write_videofile(noaudio_path, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+        #                     heygen_clip.close()
+        #                     noaudio_clip.close()
+        #                     
+        #                     # Detect face in the video
+        #                     print(f"[FACE DETECTION] Detecting face in slide {slide_number}...")
+        #                     face_info = detect_face_in_video(noaudio_path)
+        #                     
+        #                     # Resize the video
+        #                     resized_clip = VideoFileClip(noaudio_path)
+        #                     orig_w, orig_h = resized_clip.size
+        #                     target_w, target_h = width, height
+        #                     scale = min(target_w / orig_w, target_h / orig_h)
+        #                     new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+        #                     resized_clip = resized_clip.resize((new_w, new_h))
+        #                     
+        #                     # Apply circular face crop if face was detected
+        #                     if face_info:
+        #                         # Scale face info to new dimensions
+        #                         scale_factor = new_w / face_info['frame_width']
+        #                         scaled_face_info = {
+        #                             'center_x': int(face_info['center_x'] * scale_factor),
+        #                             'center_y': int(face_info['center_y'] * scale_factor),
+        #                             'radius': int(face_info['radius'] * scale_factor),
+        #                             'frame_width': new_w,
+        #                             'frame_height': new_h
+        #                         }
+        #                         
+        #                         # Apply circular crop to each frame
+        #                         def apply_circular_crop(frame):
+        #                             return create_circular_face_crop(frame, scaled_face_info)
+        #                         circular_clip = resized_clip.fl_image(apply_circular_crop)
+        #                         resized_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio_circular.webm')
+        #                         circular_clip.write_videofile(resized_path, codec='libvpx', fps=resized_clip.fps, verbose=False, logger=None)
+        #                         circular_clip.close()
+        #                         print(f"[FACE DETECTION] Circular face crop applied to slide {slide_number}")
+        #                     else:
+        #                         # No face detected, use regular resized video
+        #                         resized_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio_resized.mp4')
+        #                         resized_clip.write_videofile(resized_path, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+        #                         print(f"[FACE DETECTION] No face detected, using regular video for slide {slide_number}")
+        #                 except Exception as e:
+        #                     print(f"[COMBINED API] Error processing HeyGen video for slide {slide_number}: {e}")
+        #                     continue
+        # except Exception as e:
+        #     print(f"[COMBINED API] HeyGen overlay generation failed: {e}")
+
         # Upload to S3 using put_object
         filename = os.path.basename(output_video)
         s3_url = upload_video_to_s3(output_video, filename)
@@ -1165,6 +1080,8 @@ async def process_and_generate_video(
         return JSONResponse({
             'success': True,
             'video_filename': filename,
+            'overlay_video_filename': overlay_filename,
+            'overlay_video_preview_url': f"/download_video/{overlay_filename}" if overlay_filename else None,
             's3_url': s3_url,
             'message': 'Complete video generated successfully'
         })

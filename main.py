@@ -21,6 +21,7 @@ from app import (
 import uuid
 from dotenv import load_dotenv
 import requests
+import difflib
 
 load_dotenv()
 
@@ -57,6 +58,29 @@ def generate_audio_from_script(text: str, speed: float = 1.0, voice_id: str = "f
     with open(filepath, "wb") as f:
         f.write(audio_bytes)
     return filename, filepath
+
+def extract_proper_nouns(script):
+    # Simple regex: words with Capitalized First Letter, not at start of sentence
+    import re
+    # This will match words with a capital letter not at the start of a sentence
+    return set(re.findall(r'(?<![\.!?]\s)(?<!^)(\b[A-Z][a-zA-Z]+\b)', script))
+
+def correct_proper_nouns_in_transcript(proper_nouns, sentence_segments, word_segments):
+    # Lowercase map for fuzzy matching
+    transcript_words = set(w['text'] for w in word_segments)
+    for noun in proper_nouns:
+        # Fuzzy match in transcript words (case-insensitive)
+        matches = difflib.get_close_matches(noun.lower(), [w.lower() for w in transcript_words], n=1, cutoff=0.8)
+        if matches:
+            wrong = matches[0]
+            # Replace in word_segments
+            for w in word_segments:
+                if w['text'].lower() == wrong:
+                    w['text'] = noun
+            # Replace in sentence_segments
+            for s in sentence_segments:
+                s['text'] = ' '.join([noun if word.lower() == wrong else word for word in s['text'].split()])
+    return sentence_segments, word_segments
 
 app = FastAPI()
 
@@ -122,6 +146,10 @@ async def process_and_generate_video(
         # Transcribe audio
         print(f"[COMBINED API] Transcribing audio...")
         sentence_segments, word_segments = transcribe_audio(filepath)
+        # If both audio and script are provided, correct transcript using script
+        if audio_file and script:
+            proper_nouns = extract_proper_nouns(script)
+            sentence_segments, word_segments = correct_proper_nouns_in_transcript(proper_nouns, sentence_segments, word_segments)
         # Create SRT files
         base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
         srt_filename = f"{base_filename}_sentences.srt"
