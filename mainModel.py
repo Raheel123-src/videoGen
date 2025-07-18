@@ -9,7 +9,6 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-import whisper
 from pydub import AudioSegment
 import json
 from video_generator import VideoGenerator
@@ -60,152 +59,91 @@ BOTTOM_MARGIN = 80
 
 # Face detection cascade classifier
 face_cascade = None
+
 def get_face_cascade():
     global face_cascade
     if face_cascade is None:
-        # Try to load the cascade classifier
-        cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        face_cascade = cv2.CascadeClassifier(cascade_path)
-        if face_cascade.empty():
-            print("[FACE DETECTION] Warning: Could not load face cascade classifier")
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     return face_cascade
 
 def detect_face_in_video(video_path):
-    """Detect face in video and return face coordinates and dimensions"""
+    """Detect faces in video and return face information"""
     try:
-        # Load video
         cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            print(f"[FACE DETECTION] Could not open video: {video_path}")
+        face_cascade = get_face_cascade()
+        
+        # Read first frame
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
             return None
         
-        # Get face cascade
-        cascade = get_face_cascade()
-        if cascade is None:
-            return None
+        # Convert to grayscale for face detection
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Read first few frames to find face
-        face_detected = False
-        face_info = None
-        
-        for _ in range(10):  # Check first 10 frames
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            # Convert to grayscale for face detection
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            # Detect faces
-            faces = cascade.detectMultiScale(
-                gray,
-                scaleFactor=1.1,
-                minNeighbors=5,
-                minSize=(30, 30)
-            )
-            
-            if len(faces) > 0:
-                # Get the largest face (assuming it's the main person)
-                largest_face = max(faces, key=lambda x: x[2] * x[3])
-                x, y, w, h = largest_face
-                
-                # Calculate face center and radius
-                center_x = x + w // 2
-                center_y = y + h // 2
-                radius = max(w, h) // 2
-                
-                # Ensure radius doesn't exceed frame boundaries
-                frame_h, frame_w = frame.shape[:2]
-                radius = min(radius, min(center_x, center_y, frame_w - center_x, frame_h - center_y))
-                
-                face_info = {
-                    'center_x': center_x,
-                    'center_y': center_y,
-                    'radius': radius,
-                    'frame_width': frame_w,
-                    'frame_height': frame_h
-                }
-                face_detected = True
-                break
+        # Detect faces
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
         
         cap.release()
         
-        if face_detected:
-            print(f"[FACE DETECTION] Face detected: center=({face_info['center_x']}, {face_info['center_y']}), radius={face_info['radius']}")
-            return face_info
-        else:
-            print(f"[FACE DETECTION] No face detected in video: {video_path}")
-            return None
-            
+        if len(faces) > 0:
+            # Return the largest face (assumed to be the main subject)
+            largest_face = max(faces, key=lambda x: x[2] * x[3])
+            x, y, w, h = largest_face
+            return {
+                'x': int(x),
+                'y': int(y),
+                'width': int(w),
+                'height': int(h),
+                'center_x': int(x + w/2),
+                'center_y': int(y + h/2)
+            }
+        return None
     except Exception as e:
-        print(f"[FACE DETECTION] Error detecting face: {e}")
+        print(f"Error detecting face: {e}")
         return None
 
 def create_circular_face_crop(frame, face_info):
-    """Create circular crop around detected face, with transparent background and upper body included."""
+    """Create a circular crop around the detected face"""
     try:
-        if face_info is None:
-            return frame
-
-        h, w = frame.shape[:2]
-        center_x = face_info['center_x']
-        # Shift the center down to include more of the upper body
-        center_y = int(face_info['center_y'] + face_info['radius'] * 0.7)
-        # Expand the radius to include upper body and hand gestures
-        radius = int(face_info['radius'] * 2.2)
-
-        # Ensure the crop box is within frame bounds
-        left = max(center_x - radius, 0)
-        right = min(center_x + radius, w)
-        top = max(center_y - radius, 0)
-        bottom = min(center_y + radius, h)
-
-        # Crop the frame
-        cropped = frame[top:bottom, left:right]
-
-        # Ensure even dimensions
-        ch, cw = cropped.shape[:2]
-        if ch % 2 != 0:
-            cropped = cropped[:-1, :]
-        if cw % 2 != 0:
-            cropped = cropped[:, :-1]
-        ch, cw = cropped.shape[:2]
-
-        # Create circular mask
-        mask = np.zeros((ch, cw), dtype=np.uint8)
-        y_coords, x_coords = np.ogrid[:ch, :cw]
-        mask_area = (x_coords - cw // 2) ** 2 + (y_coords - ch // 2) ** 2 <= (min(ch, cw) // 2) ** 2
-        mask[mask_area] = 255
-
-        # Create RGBA output
-        if cropped.shape[2] == 3:
-            rgba = np.dstack([cropped, np.full((ch, cw), 255, dtype=np.uint8)])
-        else:
-            rgba = cropped.copy()
-        rgba[..., 3] = mask  # Set alpha channel
-        return rgba
+        x, y, w, h = face_info['x'], face_info['y'], face_info['width'], face_info['height']
+        center_x, center_y = face_info['center_x'], face_info['center_y']
+        
+        # Create a mask for circular crop
+        mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+        radius = min(w, h) // 2
+        cv2.circle(mask, (center_x, center_y), radius, 255, -1)
+        
+        # Apply mask to frame
+        masked_frame = cv2.bitwise_and(frame, frame, mask=mask)
+        
+        # Crop to face region
+        crop_x1 = max(0, center_x - radius)
+        crop_y1 = max(0, center_y - radius)
+        crop_x2 = min(frame.shape[1], center_x + radius)
+        crop_y2 = min(frame.shape[0], center_y + radius)
+        
+        cropped = masked_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        
+        return cropped
     except Exception as e:
-        print(f"[CIRCULAR CROP ERROR] {e}")
+        print(f"Error creating circular crop: {e}")
         return frame
 
 def upload_video_to_s3(video_path: str, filename: str) -> str:
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        region_name=AWS_DEFAULT_REGION
-    )
-    with open(video_path, "rb") as f:
-        s3.put_object(Bucket=S3_BUCKET_NAME, Key=filename, Body=f, ContentType="video/mp4")
-    return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{filename}"
-
-# Whisper model cache
-g_whisper_model = None
-def get_whisper_model():
-    global g_whisper_model
-    if g_whisper_model is None:
-        g_whisper_model = whisper.load_model("base")
-    return g_whisper_model
+    """Upload video to S3 and return the URL"""
+    try:
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY_ID,
+            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+            region_name=AWS_DEFAULT_REGION
+        )
+        s3.upload_file(video_path, S3_BUCKET_NAME, filename, ExtraArgs={'ContentType': 'video/mp4'})
+        return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{filename}"
+    except Exception as e:
+        print(f"Error uploading video to S3: {e}")
+        return None
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -239,32 +177,71 @@ def transcribe_audio(audio_path):
     try:
         if not audio_path.lower().endswith('.mp3'):
             audio_path = convert_to_mp3(audio_path)
-        model = get_whisper_model()
-        result = model.transcribe(audio_path, word_timestamps=True)
-        if result and 'segments' in result:
+        # Log audio file path and size
+        file_size = os.path.getsize(audio_path)
+        print(f"[DEBUG] Transcribing file: {audio_path} (size: {file_size} bytes)")
+        # Use OpenAI Whisper API instead of local model
+        client = get_openai_client()
+        with open(audio_path, "rb") as audio_file:
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="verbose_json",
+                timestamp_granularities=["word"]
+            )
+        # Print the raw API response as JSON
+        try:
+            print("[DEBUG] OpenAI Whisper API response (JSON):", json.dumps(result.model_dump(), indent=2))
+        except Exception as e:
+            print(f"[DEBUG] Could not dump API response as JSON: {e}")
+            print("[DEBUG] Raw API response:", result)
+        # If segments are present and not None, use them
+        if result and hasattr(result, 'segments') and result.segments:
             sentence_segments = []
-            for segment in result['segments']:
+            for segment in result.segments:
                 sentence_segments.append({
-                    'start': segment.get('start', 0),
-                    'end': segment.get('end', 0),
-                    'text': segment.get('text', '').strip()
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': segment.text.strip()
                 })
             word_segments = []
-            for segment in result['segments']:
-                if not isinstance(segment, dict):
-                    continue
-                if 'words' in segment and isinstance(segment['words'], list):
-                    for word in segment['words']:
-                        if isinstance(word, dict):
-                            word_segments.append({
-                                'start': word.get('start', 0),
-                                'end': word.get('end', 0),
-                                'text': word.get('word', '').strip()
-                            })
+            for segment in result.segments:
+                words = segment.text.strip().split()
+                if words:
+                    total_duration = segment.end - segment.start
+                    time_per_word = total_duration / len(words)
+                    for i, word in enumerate(words):
+                        word_start = segment.start + (i * time_per_word)
+                        word_end = segment.start + ((i + 1) * time_per_word)
+                        word_segments.append({
+                            'start': word_start,
+                            'end': word_end,
+                            'text': word.strip()
+                        })
+            return sentence_segments, word_segments
+        # If segments is None but words and text are present, use those
+        elif hasattr(result, 'words') and result.words and hasattr(result, 'text') and result.text:
+            print("[DEBUG] Falling back to words/text fields for sentence/word segments.")
+            # Treat the whole text as one segment
+            sentence_segments = [{
+                'start': result.words[0].start if result.words else 0,
+                'end': result.words[-1].end if result.words else 0,
+                'text': result.text.strip()
+            }]
+            word_segments = []
+            for word in result.words:
+                word_segments.append({
+                    'start': word.start,
+                    'end': word.end,
+                    'text': word.word.strip()
+                })
             return sentence_segments, word_segments
         else:
+            print("[DEBUG] No segments or words found in Whisper API response.")
+            print("[DEBUG] Full API response:", result)
             raise Exception("No transcript found")
     except Exception as e:
+        print(f"[DEBUG] Exception in transcribe_audio: {e}")
         raise Exception(f"Error transcribing audio: {str(e)}")
 
 def create_audio_segments(sentence_segments, segment_duration=15):
@@ -347,11 +324,29 @@ def create_word_srt_file(word_segments, output_path):
     except Exception as e:
         raise Exception(f"Error creating word SRT file: {str(e)}")
 
+def preprocess_script_for_tts(script: str) -> str:
+    """
+    Replace company names and tricky words with phonetic/alternate spellings for better TTS pronunciation.
+    Extend the replacements dictionary as needed.
+    """
+    replacements = {
+        # Example: 'AcmeCorp' is pronounced as 'Ack-mee Corp'
+        'AcmeCorp': 'Ack-mee Corp',
+        'NeuroTemp': 'Neuron Temp',
+        'OpenAI': 'Open A I',
+        # Add more company/product names as needed
+    }
+    for original, replacement in replacements.items():
+        script = script.replace(original, replacement)
+    return script
+
 def generate_audio_from_script(text: str, speed: float = 1.0, voice_id: str = "ftDdhfYtmfGP0tFlBYA1", stability: float = 0.35, similarity_boost: float = 0.40) -> Tuple[str, str]:
     if not ELEVENLABS_API_KEY:
         raise Exception("ELEVENLABS_API_KEY not set in environment.")
     if not voice_id:
         voice_id = ELEVENLABS_DEFAULT_VOICE_ID
+    # Preprocess script for TTS pronunciation
+    text = preprocess_script_for_tts(text)
     url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,

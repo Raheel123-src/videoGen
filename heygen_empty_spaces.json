@@ -4,9 +4,9 @@
     "format": 3,
     "empty_space": {
       "x": 1040,
-      "y": 822,
+      "y": 852,
       "width": 800,
-      "height": 118
+      "height": 88
     }
   },
   {
@@ -14,9 +14,9 @@
     "format": 2,
     "empty_space": {
       "x": 80,
-      "y": 784,
+      "y": 988,
       "width": 800,
-      "height": 156
+      "height": 0
     }
   },
   {
@@ -24,9 +24,9 @@
     "format": 3,
     "empty_space": {
       "x": 1040,
-      "y": 852,
+      "y": 988,
       "width": 800,
-      "height": 88
+      "height": 0
     }
   },
   {
@@ -34,17 +34,37 @@
     "format": 3,
     "empty_space": {
       "x": 1040,
-      "y": 822,
+      "y": 1114,
       "width": 800,
-      "height": 118
+      "height": 0
+    }
+  },
+  {
+    "slide_number": 7,
+    "format": 2,
+    "empty_space": {
+      "x": 80,
+      "y": 944,
+      "width": 800,
+      "height": 0
     }
   },
   {
     "slide_number": 8,
+    "format": 3,
+    "empty_space": {
+      "x": 1040,
+      "y": 1032,
+      "width": 800,
+      "height": 0
+    }
+  },
+  {
+    "slide_number": 9,
     "format": 2,
     "empty_space": {
       "x": 80,
-      "y": 940,
+      "y": 944,
       "width": 800,
       "height": 0
     }

@@ -3,7 +3,6 @@ import os
 import re
 import requests
 from urllib.parse import urlparse
-import whisper
 from pydub import AudioSegment
 import json
 from datetime import timedelta
@@ -35,16 +34,6 @@ if not os.path.exists(SEGMENTS_FOLDER):
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['TRANSCRIPTS_FOLDER'] = TRANSCRIPTS_FOLDER
 app.config['SEGMENTS_FOLDER'] = SEGMENTS_FOLDER
-
-# Initialize Whisper model (load once for better performance)
-whisper_model = None
-
-def get_whisper_model():
-    """Get or initialize Whisper model"""
-    global whisper_model
-    if whisper_model is None:
-        whisper_model = whisper.load_model("base")  # You can use "tiny", "base", "small", "medium", "large"
-    return whisper_model
 
 def get_openai_client():
     """Get OpenAI client"""
@@ -108,37 +97,48 @@ def convert_to_mp3(audio_path):
         raise Exception(f"Error converting audio: {str(e)}")
 
 def transcribe_audio(audio_path):
-    """Transcribe audio file using Whisper and return both sentence and word segments"""
+    """Transcribe audio file using OpenAI Whisper API and return both sentence and word segments"""
     try:
         # Convert to MP3 if needed (Whisper works best with MP3)
         if not audio_path.lower().endswith('.mp3'):
             audio_path = convert_to_mp3(audio_path)
         
-        # Load Whisper model
-        model = get_whisper_model()
+        # Use OpenAI Whisper API instead of local model
+        client = get_openai_client()
         
-        # Transcribe with word-level timestamps
-        result = model.transcribe(audio_path, word_timestamps=True)
+        with open(audio_path, "rb") as audio_file:
+            result = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="verbose_json",
+                timestamp_granularities=["word"]
+            )
         
-        if result and 'segments' in result:
+        if result and hasattr(result, 'segments') and result.segments:
             # Extract sentence segments (original functionality)
             sentence_segments = []
-            for segment in result['segments']:
+            for segment in result.segments:
                 sentence_segments.append({
-                    'start': segment['start'],
-                    'end': segment['end'],
-                    'text': segment['text'].strip()
+                    'start': segment.start,
+                    'end': segment.end,
+                    'text': segment.text.strip()
                 })
             
             # Extract word-level segments
             word_segments = []
-            for segment in result['segments']:
-                if 'words' in segment:
-                    for word in segment['words']:
+            for segment in result.segments:
+                # Create word segments from text if word-level timestamps not available
+                words = segment.text.strip().split()
+                if words:
+                    total_duration = segment.end - segment.start
+                    time_per_word = total_duration / len(words)
+                    for i, word in enumerate(words):
+                        word_start = segment.start + (i * time_per_word)
+                        word_end = segment.start + ((i + 1) * time_per_word)
                         word_segments.append({
-                            'start': word['start'],
-                            'end': word['end'],
-                            'text': word['word'].strip()
+                            'start': word_start,
+                            'end': word_end,
+                            'text': word.strip()
                         })
             
             return sentence_segments, word_segments
