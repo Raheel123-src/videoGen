@@ -21,16 +21,19 @@ image = (
 )
 
 # Define the Modal App
-app = modal.App("videogen2-fastapi", image=image)
+app = modal.App("videogen2-gpu-fastapi", image=image)
 
-# Expose the FastAPI app as a web endpoint
+# Expose the FastAPI app as a web endpoint with GPU T4
 @app.function(
     secrets=[
         modal.Secret.from_name("VideoGenSecret"),
     ],
-    timeout=600,
-    scaledown_window=300,
-    cpu=8,  # Use 8 CPU cores for concurrent processing
+    timeout=900,  # Increased timeout for GPU processing
+    scaledown_window=600,  # Increased scaledown window
+    cpu=16,  # Increased to 16 CPU cores for faster processing
+    gpu="T4",  # Use GPU T4 for faster image generation and video processing
+    memory=32768,  # 32GB RAM for better performance
+    max_containers=10,  # Allow 10 concurrent requests (updated parameter name)
 )
 @modal.asgi_app()
 def fastapi_app():
