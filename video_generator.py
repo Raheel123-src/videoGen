@@ -26,14 +26,14 @@ class VideoGenerator:
         self.font_path = os.path.join(font_folder, "CircularStd-Book.ttf")
         self.bold_font_path = os.path.join("circular-std-font-family", "CircularStd-Bold.ttf")
         
-        # Video settings - optimized for CPU-only processing
-        self.width = 1280  # Reduced from 1920 for CPU efficiency
-        self.height = 720   # Reduced from 1080 for CPU efficiency
-        self.fps = 24  # Reduced from 30 for speed
+        # Video settings - original 1920x1080 resolution
+        self.width = 1920  # Original resolution
+        self.height = 1080  # Original resolution
+        self.fps = 30  # Original frame rate
         self.background_color = (255, 255, 255)  # White
         self.text_color = (0, 0, 0)  # Black
         
-        # Font sizes
+        # Font sizes - original sizes for 1920x1080
         self.title_size = 72
         self.subtitle_size = 48
         self.body_size = 36
@@ -225,8 +225,8 @@ class VideoGenerator:
                 lines = self._wrap_text(title, self.title_font, max_text_width, draw)
                 for line in lines:
                     draw.text((x0, y0), line, fill=self.text_color, font=self.title_font)
-                    y0 += self.title_font.size + 10
-                y0 += 120  # Increased spacing between title and bullets (3x)
+                    y0 += self.title_font.size + 8
+            y0 += 80  # Reduced spacing between title and bullets for smaller fonts
             fade_in_duration = 0.5
             for i, bullet in enumerate(bullets):
                 alpha = int(255 * min(1.0, max(0, (current_time - segment_start_time - i*fade_in_duration)/fade_in_duration)))
@@ -348,7 +348,7 @@ class VideoGenerator:
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
                     y0 += self.title_font.size + 10
-                y0 += 120  # Consistent spacing between title and bullets
+                y0 += 120  # Original spacing between title and bullets
             # Bullets fade in one by one, each over 0.7s, with 1s pause between
             bullets_start_time = segment_start_time + title_reveal_duration
             bullet_times = []
@@ -401,7 +401,7 @@ class VideoGenerator:
                         draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
                     else:
                         draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 32  # More space between bullet lines for aesthetics
+                    y0 += self.body_font.size + 32  # Original spacing between bullet lines
             self._draw_subtitle(img, subtitle_text)
             return img
         # Format 3: Left image, right text (overlay image on left half, background is full slide)
@@ -489,7 +489,7 @@ class VideoGenerator:
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
                     y0 += self.title_font.size + 10
-                y0 += 120  # Consistent spacing between title and bullets
+                y0 += 120  # Original spacing between title and bullets
             # Bullets fade in one by one, each over 0.7s, with 1s pause between
             bullets_start_time = segment_start_time + title_reveal_duration
             bullet_times = []
@@ -501,7 +501,7 @@ class VideoGenerator:
                 t = current_time - bullet_appear
                 alpha = int(255 * min(1.0, max(0, t / bullet_fade_duration))) if t > 0 else 0
                 if alpha == 0:
-                    y0 += self.body_font.size + 32  # Still increment y0 to keep spacing
+                    y0 += self.body_font.size + 20  # Still increment y0 to keep spacing
                     continue  # Skip drawing this bullet until its fade-in starts
                 bullet_text = bullet
                 # Parse <highlight> tags in bullet

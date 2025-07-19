@@ -74,20 +74,20 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_DEFAULT_REGION = os.getenv("AWS_DEFAULT_REGION")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 
-# Constants
+# Constants - Original 1920x1080 resolution
 SLIDES_JSON_PATH = 'segments/slides.json'
 FONT_PATH = 'circular-std-font-family/CircularStd-Book.ttf'
-TITLE_FONT_SIZE = 72
-BODY_FONT_SIZE = 36
-SLIDE_WIDTH = 1920
-SLIDE_HEIGHT = 1080
+TITLE_FONT_SIZE = 72  # Original font size
+BODY_FONT_SIZE = 36   # Original font size
+SLIDE_WIDTH = 1920  # Original resolution
+SLIDE_HEIGHT = 1080   # Original resolution
 LEFT_MARGIN = 80
 TOP_MARGIN = 120
 BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
 BOTTOM_MARGIN = 80
 
-def upload_video_to_s3(video_path: str, filename: str) -> str:
+def upload_video_to_s3(video_path: str, filename: str) -> Optional[str]:
     """Upload video to S3 and return the URL"""
     try:
         s3 = boto3.client(
@@ -425,11 +425,69 @@ def upload_file_to_s3(local_file_path, s3_key, bucket_name=None, acl='public-rea
 def get_openai_client():
     return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Function to generate slide JSON content using GPT-4o
-def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None):
+def generate_environment_prompt_for_target_audience(target_audience: str) -> str:
+    """Generate dynamic environment prompt based on target audience"""
     client = get_openai_client()
+    
     prompt = f'''
-You are a presentation expert specializing in Indian corporate environments.
+You are an expert at creating detailed, photorealistic image prompts for different professional environments.
+
+Given the target audience: "{target_audience}", create a comprehensive environment prompt that includes:
+
+1. **Professional Setting**: Describe the specific workplace environment (office, factory, hospital, retail store, etc.)
+2. **Character Requirements**: Describe the professionals who would work in this environment
+3. **Environment Details**: Include specific equipment, furniture, lighting, and atmosphere
+4. **Cultural Context**: If applicable, include relevant cultural or regional elements
+5. **Professional Atmosphere**: Describe the mood and tone appropriate for this workplace
+
+**Requirements:**
+- Be specific and detailed
+- Focus on photorealistic, professional visuals
+- Include diverse professionals appropriate for the environment
+- Describe the setting, lighting, and atmosphere
+- Make it suitable for corporate training/educational content
+- Keep it under 200 words
+
+**Example format:**
+"Professional setting with specific details, diverse professionals in appropriate attire, environment description with equipment/furniture, natural/artificial lighting, professional atmosphere, photorealistic quality"
+
+Target Audience: {target_audience}
+
+Return ONLY the environment prompt, no explanations or additional text.
+'''
+    
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are an expert at creating detailed environment prompts for professional settings."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=300,
+        temperature=0.3
+    )
+    
+    environment_prompt = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
+    
+    # Fallback if no response
+    if not environment_prompt:
+        environment_prompt = f"Professional {target_audience} environment with diverse professionals, modern equipment, natural lighting, clean and organized workspace, photorealistic quality"
+    
+    return environment_prompt
+
+# Function to generate slide JSON content using GPT-4o
+def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, target_audience=None):
+    client = get_openai_client()
+    
+    # Generate dynamic environment prompt based on target audience
+    if target_audience:
+        environment_prompt = generate_environment_prompt_for_target_audience(target_audience)
+        print(f"[DEBUG] Generated environment prompt for '{target_audience}': {environment_prompt}")
+    else:
+        # Fallback to default Indian corporate environment
+        environment_prompt = "Indian corporate office environment with diverse professionals in formal attire, modern workspace with glass partitions, laptops, indoor plants, natural lighting, professional atmosphere, photorealistic quality"
+    
+    prompt = f'''
+You are a presentation expert specializing in creating dynamic, context-aware slides.
 
 Given the following transcript segment and its duration, output a single JSON object for the slide with these fields:
 - slide_number (integer)
@@ -444,42 +502,36 @@ Given the following transcript segment and its duration, output a single JSON ob
 - If previous_format is {previous_format}, choose ANY format except {previous_format}
 - Do NOT use format 1 or format 5. Do NOT favor any particular format - truly randomize your choice
 
-**INDIAN IMAGE REQUIREMENTS:**
-For image_prompt, generate highly detailed prompts that produce realistic Indian human characters in modern pharmaceutical industry settings—such as research labs, production facilities, or clinical environments. The image should directly relate to the slide content and transcript segment.
-
-📌 **Context Integration:**
+**DYNAMIC IMAGE PROMPT REQUIREMENTS:**
+For image_prompt, create highly detailed prompts that:
+- Use the provided environment context: "{environment_prompt}"
 - **Analyze the transcript segment** and extract key themes, emotions, or concepts
 - **Match the image to the slide content** - if the slide talks about stress management, show stressed professionals; if it's about teamwork, show collaborative scenes
 - **Incorporate specific elements** mentioned in the transcript (e.g., if "deadlines" are mentioned, show time pressure scenarios)
 - **Reflect the tone and mood** of the content (calm, energetic, focused, collaborative, etc.)
+- **Integrate the target environment** seamlessly into the scene
 
-📌 **Character Requirements:**
-- Use **Indian ethnicity, attire, and context** (e.g., kurta with ID badge, formal shirt, women in saree/blazer, men in formal shirts, Indian facial features)
-- Include diverse Indian professionals (different ages, genders, ethnicities within India)
-- Pose and expression should match the **emotion or theme of the slide** (empathy, stress, teamwork, productivity, growth, leadership)
-- **Facial expressions and body language** should reflect the content's emotional tone
+**Image Prompt Structure:**
+Combine the environment context with the slide content to create a cohesive scene. For example:
+- If transcript talks about "team collaboration" and environment is "manufacturing unit": "Team of manufacturing professionals collaborating around production line, {environment_prompt}, focused expressions, teamwork atmosphere"
+- If transcript talks about "stress management" and environment is "hospital": "Healthcare professionals in stress management training session, {environment_prompt}, calm and focused atmosphere"
 
-📌 **Office Environment Requirements:**
-- **Indian office settings** (open-plan workspace, glass partitions, laptops, Indian-style furniture, indoor plants, name boards in Hindi/English, HR posters in background)
-- **Modern Indian corporate atmosphere** (clean desks, Indian corporate culture elements)
-- **Natural or soft corporate lighting** (fluorescent or LED lighting common in Indian offices)
-- Include subtle Indian cultural elements (calendar with Indian festivals, tea cups, etc.)
-- **Scene composition** should support the slide's message (e.g., focused individual work, team meetings, training sessions)
-
-📌 **Quality Requirements:**
-- **Photorealistic, professional Indian** visuals only
-- Avoid cartoon or generic western-style visuals
+**Quality Requirements:**
+- **Photorealistic, professional** visuals only
+- Avoid cartoon or generic visuals
 - Vary people and angles slightly across slides while maintaining realism
 - No logos or copyrighted branding
 - **Ensure the image directly supports** the slide's educational or professional development message
+- **Seamlessly integrate** the target environment with the slide content
 
 **Example image_prompt format:**
-"A diverse group of Indian professionals in a modern Bangalore office, men in formal shirts and women in sarees/blazers, gathered around a glass conference table, natural lighting from large windows, laptops and notebooks visible, indoor plants in background, professional corporate atmosphere, photorealistic, 1024x1024"
+"Team of manufacturing professionals collaborating around production line, {environment_prompt}, focused expressions, teamwork atmosphere, photorealistic, 1024x1024"
 
 Transcript:
 """{segment_text}"""
 Duration: {segment_duration:.2f} seconds
 Title: {segment_title or f"Slide {segment_index+1}"}
+Target Environment: {target_audience or "General corporate"}
 '''
     def try_parse_json(raw):
         import json
@@ -502,7 +554,7 @@ Title: {segment_title or f"Slide {segment_index+1}"}
         max_tokens=700,
         temperature=0.4
     )
-    raw_json = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
+    raw_json = response.choices[0].message.content.strip() if response.choices[0].message.content and response.choices[0].message.content.strip() else ""
     slide_json = try_parse_json(raw_json)
     if slide_json is None:
         fix_prompt = f"Fix this JSON and return only the corrected JSON object, no commentary:\n{raw_json}"
@@ -515,7 +567,7 @@ Title: {segment_title or f"Slide {segment_index+1}"}
             max_tokens=700,
             temperature=0.2
         )
-        fixed_json = fix_response.choices[0].message.content.strip() if fix_response.choices[0].message.content else ""
+        fixed_json = fix_response.choices[0].message.content.strip() if fix_response.choices[0].message.content and fix_response.choices[0].message.content.strip() else ""
         slide_json = try_parse_json(fixed_json)
         if slide_json is None:
             raise Exception(f"Failed to parse/fix JSON for segment {segment_index}. Raw: {raw_json}")
@@ -523,19 +575,21 @@ Title: {segment_title or f"Slide {segment_index+1}"}
 
 # Function to create slides.json from segments
 
-def create_slides_json_from_segments(segments, slides_json_path):
+def create_slides_json_from_segments(segments, slides_json_path, target_audience=None):
     """Create slides.json from pre-created segments"""
     slides = []
     total_segments = len(segments)
     previous_format = None
     
     print(f"[DEBUG] Creating {total_segments} slides from segments")
+    if target_audience:
+        print(f"[DEBUG] Using target audience: {target_audience}")
     
     for i, segment in enumerate(segments):
         percent = int((i+1)/total_segments*100)
         duration = segment['end'] - segment['start']
         print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s", flush=True)
-        slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format)
+        slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format, target_audience=target_audience)
         previous_format = slide_json.get('format', previous_format)
         slides.append(slide_json)
     
@@ -611,9 +665,11 @@ def parse_timestamp_to_seconds(timestamp):
     except:
         return 0.0
 
-def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path):
+def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=None):
     """Create slides.json from corrected SRT content with smart segment logic"""
     print("[DEBUG] Creating slides from corrected SRT content...")
+    if target_audience:
+        print(f"[DEBUG] Using target audience: {target_audience}")
     
     # Parse the corrected SRT back into segments
     corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
@@ -658,7 +714,7 @@ def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_pa
                 # Update the slide content with merged text
                 merged_text = last_slide.get('text', '') + " " + remaining_text.strip()
                 print(f"Generating updated slide JSON for merged segment {segment_index} (extended duration)")
-                updated_slide_json = generate_slide_json_content(merged_text.strip(), segment_index-1, total_duration - last_slide.get('start_time', segment_start-15), previous_format=previous_format)
+                updated_slide_json = generate_slide_json_content(merged_text.strip(), segment_index-1, total_duration - last_slide.get('start_time', segment_start-15), previous_format=previous_format, target_audience=target_audience)
                 
                 # Update the last slide with new content
                 slides[-1] = updated_slide_json
@@ -677,7 +733,7 @@ def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_pa
         
         if segment_text.strip():
             print(f"Generating slide JSON for corrected segment {segment_index+1} ({segment_start:.1f}s - {segment_end:.1f}s)")
-            slide_json = generate_slide_json_content(segment_text.strip(), segment_index, segment_end - segment_start, previous_format=previous_format)
+            slide_json = generate_slide_json_content(segment_text.strip(), segment_index, segment_end - segment_start, previous_format=previous_format, target_audience=target_audience)
             previous_format = slide_json.get('format', previous_format)
             slides.append(slide_json)
             segment_index += 1
@@ -935,7 +991,7 @@ Return a JSON object with two keys: 'sentences' (corrected sentence segments) an
     )
     import re
     import json as pyjson
-    raw = response.choices[0].message.content.strip()
+    raw = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
     print("[DEBUG] Raw GPT response:\n" + raw)
     # Try to extract JSON from the response
     try:
@@ -990,7 +1046,7 @@ Word-level SRT:
         max_tokens=8000,
         temperature=0.0
     )
-    raw = response.choices[0].message.content.strip()
+    raw = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
     # Save raw GPT response to a test file for debugging
     test_path = os.path.join(TRANSCRIPTS_FOLDER, 'TEST_gpt_srt_response.txt')
     with open(test_path, 'w', encoding='utf-8') as f:
@@ -1054,7 +1110,8 @@ async def process_and_generate_video(
     similarity_boost: Optional[float] = Form(None),
     video_name: str = Form(...),
     show_subtitles: str = Form("true"),
-    selected_background: str = Form("")
+    selected_background: str = Form(""),
+    target_audience: Optional[str] = Form(None)
 ):
     # Generate unique session ID for this request
     session_id = f"{video_name}_{uuid.uuid4().hex[:8]}"
@@ -1136,12 +1193,12 @@ async def process_and_generate_video(
         # If GPT correction was used, create slides from corrected SRT
         if (audio_file or audio_url) and script:
             print("[DEBUG] Creating slides from GPT-corrected SRT content...")
-            create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path)
+            create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=target_audience)
         else:
             # Use original transcription for slides
             print("[DEBUG] Creating slides from original transcription...")
             audio_segments = create_audio_segments(sentence_segments, 15)
-            create_slides_json_from_segments(audio_segments, slides_json_path)
+            create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
         
         # Create segments.json for video generation (always use original segments for timing)
         audio_segments = create_audio_segments(sentence_segments, 15)
