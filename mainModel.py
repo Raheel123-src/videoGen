@@ -908,8 +908,8 @@ def generate_images_from_slides(slides_json_path='segments/slides.json'):
     print("=" * 60)
     
     # Use ThreadPoolExecutor for parallel processing
-    # Limit to 2 concurrent requests for CPU-only processing to avoid overwhelming the API
-    max_workers = min(2, total_images)
+    # Use up to 10 concurrent requests with GPU T4 for maximum performance
+    max_workers = min(10, total_images)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
