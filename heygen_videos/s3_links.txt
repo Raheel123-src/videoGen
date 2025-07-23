@@ -1,4 +1,0 @@
-https://lisa-research.s3.ap-south-1.amazonaws.com/heygen_segments/slide_1_audio.mp3
-https://lisa-research.s3.ap-south-1.amazonaws.com/heygen_segments/slide_3_audio.mp3
-https://lisa-research.s3.ap-south-1.amazonaws.com/heygen_segments/slide_4_audio.mp3
-https://lisa-research.s3.ap-south-1.amazonaws.com/heygen_segments/slide_5_audio.mp3
