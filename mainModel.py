@@ -87,6 +87,78 @@ BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
 BOTTOM_MARGIN = 80
 
+# --- HeyGen Overlay Constants ---
+SLIDES_JSON_PATH = 'segments/slides.json'
+FONT_PATH = 'circular-std-font-family/CircularStd-Book.ttf'
+TITLE_FONT_SIZE = 72
+BODY_FONT_SIZE = 36
+SLIDE_WIDTH = 1920
+SLIDE_HEIGHT = 1080
+LEFT_MARGIN = 80
+TOP_MARGIN = 120
+BULLET_SPACING = 44
+SUBTITLE_HEIGHT = 60
+BOTTOM_MARGIN = 80
+
+# --- HeyGen Overlay Helper Functions ---
+def wrap_text(text, font, max_width, draw):
+    words = text.split()
+    lines = []
+    current_line = ''
+    for word in words:
+        test_line = current_line + (' ' if current_line else '') + word
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        width = bbox[2] - bbox[0]
+        if width <= max_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    return lines
+
+def calculate_empty_space(slide, title_font, body_font):
+    format_type = slide.get('format')
+    if format_type not in [2, 3]:
+        return None
+    title = slide.get('title', '')
+    bullets = slide.get('bullets', [])
+    max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
+    draw = ImageDraw.Draw(img)
+    y = TOP_MARGIN
+    title_lines = wrap_text(title, title_font, max_text_width, draw)
+    for line in title_lines:
+        y += title_font.size + 10
+    y += 120
+    for bullet in bullets:
+        bullet_lines = wrap_text(bullet, body_font, max_text_width, draw)
+        for line in bullet_lines:
+            y += body_font.size + 8
+        y += 24
+    bullets_end_y = y
+    subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
+    empty_space_top = bullets_end_y
+    empty_space_bottom = subtitle_y
+    empty_space_height = max(0, empty_space_bottom - empty_space_top)
+    if format_type == 2:
+        x = LEFT_MARGIN
+    else:
+        x = SLIDE_WIDTH // 2 + LEFT_MARGIN
+    width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+    return {
+        'slide_number': slide.get('slide_number'),
+        'format': format_type,
+        'empty_space': {
+            'x': x,
+            'y': empty_space_top,
+            'width': width,
+            'height': empty_space_height
+        }
+    }
+
 def upload_video_to_s3(video_path: str, filename: str) -> Optional[str]:
     """Upload video to S3 and return the URL"""
     try:
@@ -377,26 +449,6 @@ def generate_audio_from_script(text: str, speed: float = 1.0, voice_id: str = "f
     with open(filepath, "wb") as f:
         f.write(audio_bytes)
     return filename, filepath
-
-
-def wrap_text(text, font, max_width, draw):
-    words = text.split()
-    lines = []
-    current_line = ''
-    for word in words:
-        test_line = current_line + (' ' if current_line else '') + word
-        bbox = draw.textbbox((0, 0), test_line, font=font)
-        width = bbox[2] - bbox[0]
-        if width <= max_width:
-            current_line = test_line
-        else:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
-    if current_line:
-        lines.append(current_line)
-    return lines
-
 
 
 def upload_file_to_s3(local_file_path, s3_key, bucket_name=None, acl='public-read'):
@@ -1099,6 +1151,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Simple job status tracking (in-memory dict for now, can be replaced with persistent store)
+job_status = {}
+
 @app.post("/process_and_generate_video")
 async def process_and_generate_video(
     audio_file: Optional[UploadFile] = File(None),
@@ -1110,168 +1165,534 @@ async def process_and_generate_video(
     similarity_boost: Optional[float] = Form(None),
     video_name: str = Form(...),
     show_subtitles: str = Form("true"),
-    selected_background: str = Form(""),
-    target_audience: Optional[str] = Form(None)
+    target_audience: Optional[str] = Form(None),
+    heygen_avatar_id: Optional[str] = Form(None)
 ):
-    # Generate unique session ID for this request
     session_id = f"{video_name}_{uuid.uuid4().hex[:8]}"
-    session_uploads, session_transcripts, session_segments = create_session_directories(session_id)
-    
-    try:
-        if not audio_file and not audio_url and not script:
-            return JSONResponse({"error": "Please provide either an audio file, audio URL, or a script."}, status_code=400)
-        if not video_name:
-            return JSONResponse({"error": "Video name is required"}, status_code=400)
-        video_name_clean = re.sub(r'[^a-zA-Z0-9_]', '_', video_name)
-        if not video_name_clean:
-            return JSONResponse({"error": "Invalid video name"}, status_code=400)
-        print(f"[COMBINED API] Starting combined process for video: {video_name_clean} (session: {session_id})")
-        if audio_file:
-            filename = audio_file.filename or f"audio_{random.randint(1000,9999)}.mp3"
-            filepath = os.path.join(session_uploads, filename)
-            with open(filepath, "wb") as f:
-                f.write(await audio_file.read())
-            print(f"[COMBINED API] Saved uploaded file: {filepath}")
-        elif audio_url:
-            filename, filepath = download_audio_file(audio_url)
-            if not filename:
-                filename = f"audio_{random.randint(1000,9999)}.mp3"
-            if not filepath:
-                return JSONResponse({"error": "Failed to download audio file."}, status_code=400)
-            # Move downloaded file to session directory
-            session_filepath = os.path.join(session_uploads, filename)
-            import shutil
-            shutil.move(filepath, session_filepath)
-            filepath = session_filepath
-            print(f"[COMBINED API] Downloaded file: {filepath}")
-        elif script:
-            use_speed = speed if speed is not None else 1.0
-            use_voice_id = voice_id if voice_id else ELEVENLABS_DEFAULT_VOICE_ID
-            use_stability = stability if stability is not None else 0.35
-            use_similarity_boost = similarity_boost if similarity_boost is not None else 0.40
-            filename, filepath = generate_audio_from_script(script, use_speed, use_voice_id, use_stability, use_similarity_boost)
-            # Move generated file to session directory
-            session_filepath = os.path.join(session_uploads, filename)
-            import shutil
-            shutil.move(filepath, session_filepath)
-            filepath = session_filepath
-            print(f"[COMBINED API] Generated audio from script: {filepath}")
-        else:
-            return JSONResponse({"error": "No valid audio input provided."}, status_code=400)
-        if not os.path.exists(filepath):
-            return JSONResponse({"error": "Audio file not found after upload/generation."}, status_code=500)
-        print(f"[COMBINED API] Transcribing audio...")
-        sentence_segments, word_segments = transcribe_audio(filepath)
-        base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
-        srt_filename = f"{base_filename}_sentences.srt"
-        srt_filepath = os.path.join(session_transcripts, srt_filename)
-        create_srt_file(sentence_segments, srt_filepath)
-        word_srt_filename = f"{base_filename}_words.srt"
-        word_srt_filepath = os.path.join(session_transcripts, word_srt_filename)
-        create_word_srt_file(word_segments, word_srt_filepath)
-        # If both audio (file or URL) and script are provided, use GPT to correct SRTs
-        if (audio_file or audio_url) and script:
-            print("[DEBUG] Sending SRTs and script to GPT for correction...")
-            with open(srt_filepath, 'r', encoding='utf-8') as f:
-                srt_sentence_content = f.read()
-            with open(word_srt_filepath, 'r', encoding='utf-8') as f:
-                srt_word_content = f.read()
+    job_status[session_id] = {"status": "pending", "result": None, "error": None}
+    def background_job(audio_file_content=None):
+        try:
+            job_status[session_id]["status"] = "processing"
+            # Generate unique session ID for this request
+            # session_id is already set
+            session_uploads, session_transcripts, session_segments = create_session_directories(session_id)
+            if not audio_file and not audio_url and not script:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Please provide either an audio file, audio URL, or a script."
+                return
+            if not video_name:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Video name is required"
+                return
+            video_name_clean = re.sub(r'[^a-zA-Z0-9_]', '_', video_name)
+            if not video_name_clean:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Invalid video name"
+                return
+            print(f"[COMBINED API] Starting combined process for video: {video_name_clean} (session: {session_id})")
+            if audio_file_content is not None:
+                filename = audio_file.filename or f"audio_{random.randint(1000,9999)}.mp3"
+                filepath = os.path.join(session_uploads, filename)
+                with open(filepath, "wb") as f:
+                    f.write(audio_file_content)
+                print(f"[COMBINED API] Saved uploaded file: {filepath}")
+            elif audio_url:
+                filename, filepath = download_audio_file(audio_url)
+                if not filename:
+                    filename = f"audio_{random.randint(1000,9999)}.mp3"
+                if not filepath:
+                    job_status[session_id]["status"] = "error"
+                    job_status[session_id]["error"] = "Failed to download audio file."
+                    return
+                # Move downloaded file to session directory
+                session_filepath = os.path.join(session_uploads, filename)
+                import shutil
+                shutil.move(filepath, session_filepath)
+                filepath = session_filepath
+                print(f"[COMBINED API] Downloaded file: {filepath}")
+            elif script:
+                use_speed = speed if speed is not None else 1.0
+                use_voice_id = voice_id if voice_id else ELEVENLABS_DEFAULT_VOICE_ID
+                use_stability = stability if stability is not None else 0.35
+                use_similarity_boost = similarity_boost if similarity_boost is not None else 0.40
+                filename, filepath = generate_audio_from_script(script, use_speed, use_voice_id, use_stability, use_similarity_boost)
+                # Move generated file to session directory
+                session_filepath = os.path.join(session_uploads, filename)
+                import shutil
+                shutil.move(filepath, session_filepath)
+                filepath = session_filepath
+                print(f"[COMBINED API] Generated audio from script: {filepath}")
+            else:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "No valid audio input provided."
+                return
+            if not os.path.exists(filepath):
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Audio file not found after upload/generation."
+                return
+            print(f"[COMBINED API] Transcribing audio...")
+            sentence_segments, word_segments = transcribe_audio(filepath)
+            base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
+            srt_filename = f"{base_filename}_sentences.srt"
+            srt_filepath = os.path.join(session_transcripts, srt_filename)
+            create_srt_file(sentence_segments, srt_filepath)
+            word_srt_filename = f"{base_filename}_words.srt"
+            word_srt_filepath = os.path.join(session_transcripts, word_srt_filename)
+            create_word_srt_file(word_segments, word_srt_filepath)
+            # If a script is provided, always run SRT correction after transcription (regardless of audio source)
+            if script:
+                print("[DEBUG] Sending SRTs and script to GPT for correction...")
+                with open(srt_filepath, 'r', encoding='utf-8') as f:
+                    srt_sentence_content = f.read()
+                with open(word_srt_filepath, 'r', encoding='utf-8') as f:
+                    srt_word_content = f.read()
+                try:
+                    corrected_sentence_srt, corrected_word_srt = gpt_refactor_transcripts_srt(script, srt_sentence_content, srt_word_content)
+                except Exception as e:
+                    print(f"[ERROR] GPT SRT correction failed: {e}")
+                    return JSONResponse({"error": f"GPT SRT correction failed: {e}"}, status_code=500)
+                # Overwrite the SRT files with the corrected SRTs
+                with open(srt_filepath, 'w', encoding='utf-8') as f:
+                    f.write(corrected_sentence_srt)
+                with open(word_srt_filepath, 'w', encoding='utf-8') as f:
+                    f.write(corrected_word_srt)
+            
+            # --- Ensure slides.json is generated ---
+            slides_json_path = os.path.join(session_segments, 'slides.json')
+            # If SRT correction was run, create slides and segments from corrected SRT
+            if script:
+                print("[DEBUG] Creating slides and segments from GPT-corrected SRT content...")
+                create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=target_audience)
+                # Also create segments.json from corrected SRT
+                corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
+                audio_segments = create_audio_segments(corrected_segments, 15)
+            else:
+                # Use original transcription for slides and segments
+                print("[DEBUG] Creating slides and segments from original transcription...")
+                audio_segments = create_audio_segments(sentence_segments, 15)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
+            # Create segments.json for video generation (always use the segments from above)
+            segments_filename = f"{base_filename}_segments.json"
+            segments_filepath = os.path.join(session_segments, segments_filename)
+            segments_data = {
+                "segments": [
+                    {
+                        "segment_id": i + 1,
+                        "start_time": seg["start"] if isinstance(seg, dict) and "start" in seg else 0,
+                        "end_time": seg["end"] if isinstance(seg, dict) and "end" in seg else 0,
+                        "duration": (seg["end"] - seg["start"]) if isinstance(seg, dict) and "end" in seg and "start" in seg else 0,
+                        "text": seg["text"] if isinstance(seg, dict) and "text" in seg else ""
+                    } for i, seg in enumerate(audio_segments) if isinstance(seg, dict)
+                ]
+            }
+            with open(segments_filepath, 'w', encoding='utf-8') as f:
+                json.dump(segments_data, f, indent=2, ensure_ascii=False)
+            print(f"[COMBINED API] Audio processing completed")
+            print(f"[COMBINED API] Generating images with optimized parallel processing...")
             try:
-                corrected_sentence_srt, corrected_word_srt = gpt_refactor_transcripts_srt(script, srt_sentence_content, srt_word_content)
+                success = generate_images_from_slides(slides_json_path)
+                if success:
+                    print(f"[COMBINED API] Image generation completed with optimization")
+                else:
+                    print(f"[COMBINED API] Image generation failed")
             except Exception as e:
-                print(f"[ERROR] GPT SRT correction failed: {e}")
-                return JSONResponse({"error": f"GPT SRT correction failed: {e}"}, status_code=500)
-            # Overwrite the SRT files with the corrected SRTs
-            with open(srt_filepath, 'w', encoding='utf-8') as f:
-                f.write(corrected_sentence_srt)
-            with open(word_srt_filepath, 'w', encoding='utf-8') as f:
-                f.write(corrected_word_srt)
-        
-        # --- Ensure slides.json is generated ---
-        slides_json_path = os.path.join(session_segments, 'slides.json')
-        
-        # If GPT correction was used, create slides from corrected SRT
-        if (audio_file or audio_url) and script:
-            print("[DEBUG] Creating slides from GPT-corrected SRT content...")
-            create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=target_audience)
-        else:
-            # Use original transcription for slides
-            print("[DEBUG] Creating slides from original transcription...")
-            audio_segments = create_audio_segments(sentence_segments, 15)
-            create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
-        
-        # Create segments.json for video generation (always use original segments for timing)
-        audio_segments = create_audio_segments(sentence_segments, 15)
-        segments_filename = f"{base_filename}_segments.json"
-        segments_filepath = os.path.join(session_segments, segments_filename)
-        # Write segments with start_time/end_time keys for Modal/video generator compatibility
-        segments_data = {
-            "segments": [
-                {
-                    "segment_id": i + 1,
-                    "start_time": seg["start"] if isinstance(seg, dict) and "start" in seg else 0,
-                    "end_time": seg["end"] if isinstance(seg, dict) and "end" in seg else 0,
-                    "duration": (seg["end"] - seg["start"]) if isinstance(seg, dict) and "end" in seg and "start" in seg else 0,
-                    "text": seg["text"] if isinstance(seg, dict) and "text" in seg else ""
-                } for i, seg in enumerate(audio_segments) if isinstance(seg, dict)
-            ]
-        }
-        with open(segments_filepath, 'w', encoding='utf-8') as f:
-            json.dump(segments_data, f, indent=2, ensure_ascii=False)
-        print(f"[COMBINED API] Audio processing completed")
-        print(f"[COMBINED API] Generating images with optimized parallel processing...")
-        try:
-            success = generate_images_from_slides(slides_json_path)
-            if success:
-                print(f"[COMBINED API] Image generation completed with optimization")
-            else:
-                print(f"[COMBINED API] Image generation failed")
+                print(f"[COMBINED API] Image generation failed: {e}")
+            print(f"[COMBINED API] Adding highlights...")
+            try:
+                success = add_highlights_to_slides(slides_json_path)
+                if success:
+                    print(f"[COMBINED API] Highlights added")
+                else:
+                    print(f"[COMBINED API] Highlight addition failed")
+            except Exception as e:
+                print(f"[COMBINED API] Highlight script failed: {e}")
+            print(f"[COMBINED API] Generating video...")
+            # Always use 1.jpg as background
+            selected_bg = '1.jpg'
+            video_gen = VideoGenerator(
+                segments_folder=session_segments,
+                transcripts_folder=session_transcripts,
+                font_folder='circular-std-font-family'
+            )
+            output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
+            video_gen.generate_video(segments_filepath, word_srt_filepath, filepath, output_video, 
+                                   show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
+            print(f"[COMBINED API] Video generated successfully: {output_video}")
+            
+            # --- Calculate and save heygen_empty_spaces.json ---
+            heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
+            calculate_and_save_heygen_empty_spaces(slides_json_path, heygen_empty_spaces_path)
+            # --- Overlay HeyGen avatar videos in empty spaces ---
+            heygen_overlay_result = overlay_heygen_avatars(
+                heygen_empty_spaces_path=heygen_empty_spaces_path,
+                segments_filepath=segments_filepath,
+                filepath=filepath,
+                session_uploads=session_uploads,
+                session_segments=session_segments,
+                session_id=session_id,
+                heygen_avatar_id=heygen_avatar_id  # <-- pass avatar id
+            )
+            
+            # --- Composite HeyGen overlays into the base video ---
+            heygen_composited_video_path = os.path.join(session_uploads, f"{video_name_clean}_with_heygen.mp4")
+            try:
+                heygen_output_dir = os.path.join(session_uploads, 'heygen_videos')
+                create_heygen_overlay_video(
+                    base_video_path=output_video,
+                    heygen_videos_dir=heygen_output_dir,
+                    heygen_empty_spaces_path=heygen_empty_spaces_path,
+                    segments_json_path=segments_filepath,
+                    output_path=heygen_composited_video_path
+                )
+                heygen_composited_s3_url = upload_video_to_s3(heygen_composited_video_path, os.path.basename(heygen_composited_video_path))
+            except Exception as e:
+                print(f"[HEYGEN OVERLAY ERROR] Failed to composite overlays: {e}")
+                heygen_composited_s3_url = None
+            
+            # Upload to S3 using put_object
+            filename = os.path.basename(output_video)
+            s3_url = upload_video_to_s3(output_video, filename)
+            # Optionally, upload a sample HeyGen overlay video if created
+            heygen_overlay_video_path = None
+            heygen_overlay_s3_url = None
+            heygen_output_dir = os.path.join(session_uploads, 'heygen_videos')
+            if os.path.exists(heygen_output_dir):
+                # Find the first heygen overlay video (resized or noaudio)
+                for f in os.listdir(heygen_output_dir):
+                    if f.endswith('_heygen_noaudio_resized.mp4') or f.endswith('_heygen_noaudio.mp4'):
+                        heygen_overlay_video_path = os.path.join(heygen_output_dir, f)
+                        break
+            if heygen_overlay_video_path and os.path.exists(heygen_overlay_video_path):
+                heygen_overlay_filename = os.path.basename(heygen_overlay_video_path)
+                heygen_overlay_s3_url = upload_video_to_s3(heygen_overlay_video_path, heygen_overlay_filename)
+            
+            # Clean up session files after successful upload
+            # cleanup_session_files(session_id)
+            
+            job_status[session_id]["status"] = "done"
+            job_status[session_id]["result"] = {
+                'success': True,
+                'video_filename': filename,
+                's3_url': s3_url,
+                'heygen_overlay_video': heygen_composited_s3_url,
+                'message': 'Complete video generated successfully',
+                'session_id': session_id
+            }
         except Exception as e:
-            print(f"[COMBINED API] Image generation failed: {e}")
-        print(f"[COMBINED API] Adding highlights...")
+            job_status[session_id]["status"] = "error"
+            job_status[session_id]["error"] = str(e)
+
+    audio_file_content = await audio_file.read() if audio_file is not None else None
+    threading.Thread(target=background_job, args=(audio_file_content,), daemon=True).start()
+    return JSONResponse({"session_id": session_id, "status": "pending"})
+
+@app.get("/video_status")
+def video_status(session_id: str):
+    if session_id not in job_status:
+        return JSONResponse({"error": "Invalid session_id"}, status_code=404)
+    status = job_status[session_id]["status"]
+    if status == "done":
+        return JSONResponse({"status": status, **job_status[session_id]["result"]})
+    elif status == "error":
+        return JSONResponse({"status": status, "error": job_status[session_id]["error"]})
+    else:
+        return JSONResponse({"status": status})
+
+# --- Calculate and save heygen_empty_spaces.json ---
+def calculate_and_save_heygen_empty_spaces(slides_json_path, output_path):
+    try:
         try:
-            success = add_highlights_to_slides(slides_json_path)
-            if success:
-                print(f"[COMBINED API] Highlights added")
-            else:
-                print(f"[COMBINED API] Highlight addition failed")
-        except Exception as e:
-            print(f"[COMBINED API] Highlight script failed: {e}")
-        print(f"[COMBINED API] Generating video...")
-        if not selected_background:
-            bg_files = [f for f in os.listdir('background') if f.lower().endswith(('.jpg', '.png'))]
-            selected_bg = random.choice(bg_files) if bg_files else None
-        else:
-            selected_bg = selected_background
-            if not os.path.exists(os.path.join('background', selected_bg)):
-                bg_files = [f for f in os.listdir('background') if f.lower().endswith(('.jpg', '.png'))]
-                selected_bg = random.choice(bg_files) if bg_files else None
-        video_gen = VideoGenerator(
-            segments_folder=session_segments,
-            transcripts_folder=session_transcripts,
-            font_folder='circular-std-font-family'
-        )
-        output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
-        video_gen.generate_video(segments_filepath, word_srt_filepath, filepath, output_video, 
-                               show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
-        print(f"[COMBINED API] Video generated successfully: {output_video}")
-        
-        # Upload to S3 using put_object
-        filename = os.path.basename(output_video)
-        s3_url = upload_video_to_s3(output_video, filename)
-        
-        # Clean up session files after successful upload
-        cleanup_session_files(session_id)
-        
-        return JSONResponse({
-            'success': True,
-            'video_filename': filename,
-            's3_url': s3_url,
-            'message': 'Complete video generated successfully',
-            'session_id': session_id
-        })
+            title_font = ImageFont.truetype(FONT_PATH, TITLE_FONT_SIZE)
+            body_font = ImageFont.truetype(FONT_PATH, BODY_FONT_SIZE)
+        except Exception:
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+        with open(slides_json_path, 'r', encoding='utf-8') as f:
+            slides = json.load(f)
+        empty_spaces = []
+        for slide in slides:
+            result = calculate_empty_space(slide, title_font, body_font)
+            if result:
+                empty_spaces.append(result)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(empty_spaces, f, indent=2)
+        print(f"[COMBINED API] Identified empty spaces for {len(empty_spaces)} slides (formats 2 & 3). Saved to {output_path}.")
     except Exception as e:
-        print(f"[COMBINED API ERROR] Process failed: {e}")
-        # Clean up session files on error
-        cleanup_session_files(session_id)
-        return JSONResponse({"error": str(e)}, status_code=500) 
+        print(f"[COMBINED API] Empty space detection failed: {e}")
+
+# --- Overlay HeyGen avatar videos in empty spaces ---
+def overlay_heygen_avatars(
+    heygen_empty_spaces_path,
+    segments_filepath,
+    filepath,
+    session_uploads,
+    session_segments,
+    session_id,
+    heygen_avatar_id=None  # <-- accept avatar id
+):
+    import concurrent.futures
+    overlay_filename = None
+    try:
+        heygen_output_dir = os.path.join(session_uploads, 'heygen_videos')
+        os.makedirs(heygen_output_dir, exist_ok=True)
+        s3_links_path = os.path.join(heygen_output_dir, 's3_links.txt')
+        with open(s3_links_path, 'w') as f:
+            f.write('')
+        heygen_api_key = os.getenv('HEYGEN_API_KEY')
+        heygen_avatar_id = heygen_avatar_id or 'Jocelyn_sitting_office_side'
+        audio_file_path = filepath
+        import json as pyjson
+        with open(heygen_empty_spaces_path, 'r', encoding='utf-8') as f:
+            empty_spaces = pyjson.load(f)
+        if not empty_spaces:
+            print("[COMBINED API] No empty spaces found for HeyGen overlays")
+            overlay_filename = None
+        else:
+            print(f"[COMBINED API] Found {len(empty_spaces)} slides for HeyGen avatar overlays")
+            with open(segments_filepath, 'r', encoding='utf-8') as f:
+                segments_data = pyjson.load(f)
+            segments = segments_data.get('segments', [])
+            if not heygen_api_key or heygen_api_key == 'YOUR_HEYGEN_API_KEY':
+                print("[COMBINED API] HeyGen API key not configured, skipping avatar overlays")
+                overlay_filename = None
+            elif not S3_BUCKET_NAME:
+                print("[COMBINED API] S3 bucket not configured, skipping avatar overlays")
+                overlay_filename = None
+            else:
+                slide_segments = []
+                for space in empty_spaces:
+                    slide_number = space.get('slide_number')
+                    segment = next((s for s in segments if s.get('segment_id') == slide_number), None)
+                    if not segment:
+                        continue
+                    slide_segments.append({
+                        'slide_number': slide_number,
+                        'start_time': segment.get('start_time', 0),
+                        'end_time': segment.get('end_time', 0),
+                        'empty_space': space['empty_space']
+                    })
+                print(f"[COMBINED API] Generating HeyGen videos for {len(slide_segments)} slides...")
+                # --- Concurrent HeyGen API calls ---
+                def post_and_poll_heygen(slide):
+                    import requests, time
+                    slide_number = slide['slide_number']
+                    start_time = slide['start_time']
+                    end_time = slide['end_time']
+                    area = slide['empty_space']
+                    empty_w, empty_h = int(area['width']), int(area['height'])
+                    max_side = min(empty_w, empty_h)
+                    if max_side <= 0:
+                        print(f"[HEYGEN OVERLAY WARNING] max_side is {max_side} for slide {slide_number}, skipping overlay.")
+                        return None
+                    segment_audio = AudioSegment.from_file(audio_file_path)[start_time * 1000:end_time * 1000]
+                    segment_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_audio.mp3')
+                    segment_audio.export(segment_path, format='mp3')
+                    s3_key = f'heygen_segments/{session_id}/slide_{slide_number}_audio.mp3'
+                    s3_url = upload_file_to_s3(segment_path, s3_key, bucket_name=S3_BUCKET_NAME)
+                    if s3_url:
+                        with open(s3_links_path, 'a') as f:
+                            f.write(s3_url + '\n')
+                    if not s3_url:
+                        print(f"[COMBINED API] Failed to upload audio for slide {slide_number}")
+                        return None
+                    post_headers = {
+                        'Authorization': f'Bearer {heygen_api_key}',
+                        'Content-Type': 'application/json',
+                    }
+                    payload = {
+                        "video_inputs": [
+                            {
+                                "character": {
+                                    "type": "avatar",
+                                    "avatar_id": heygen_avatar_id,
+                                    "avatar_style": "circle"
+                                },
+                                "voice": {
+                                    "type": "audio",
+                                    "audio_url": s3_url
+                                },
+                                "background": {
+                                    "type": "color",
+                                    "value": "#FFFFFF"
+                                }
+                            }
+                        ],
+                        "dimensions": {
+                            "width": max_side,
+                            "height": max_side
+                        }
+                    }
+                    try:
+                        resp = requests.post("https://api.heygen.com/v2/video/generate", json=payload, headers=post_headers)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        video_id = data['data']['video_id']
+                        print(f'[COMBINED API] Video requested, id: {video_id}')
+                    except Exception as e:
+                        print(f'[COMBINED API] HeyGen API error for slide {slide_number}: {e}')
+                        return None
+                    status_url = f'https://api.heygen.com/v1/video_status.get?video_id={video_id}'
+                    get_headers = {
+                        'accept': 'application/json',
+                        'x-api-key': heygen_api_key,
+                    }
+                    time.sleep(5)
+                    poll_count = 0
+                    video_url = None
+                    while True:
+                        try:
+                            status_resp = requests.get(status_url, headers=get_headers)
+                            if status_resp.status_code == 404:
+                                print(f'[{poll_count}] Video not found yet, retrying...')
+                                time.sleep(3)
+                                poll_count += 1
+                                continue
+                            status_resp.raise_for_status()
+                            status_json = status_resp.json()
+                            print(f'[{poll_count}] Full response: {status_json}')
+                            status = status_json['data']['status']
+                            if status == 'completed':
+                                video_url = status_json['data']['video_url']
+                                print(f'[COMBINED API] Video ready at: {video_url}')
+                                break
+                            elif status == 'failed':
+                                print(f'[COMBINED API] HeyGen video generation failed for slide {slide_number}. Status response: {status_json}')
+                                break
+                            print(f'[{poll_count}] Current status: {status}')
+                        except requests.exceptions.RequestException as e:
+                            print(f'Error polling status: {e}')
+                        time.sleep(5)
+                        poll_count += 1
+                    if not video_url:
+                        return None
+                    # Download video
+                    try:
+                        import requests
+                        parsed_url = urlparse(video_url)
+                        base_name = os.path.basename(parsed_url.path)
+                        video_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen.mp4')
+                        with requests.get(video_url, stream=True) as r:
+                            r.raise_for_status()
+                            with open(video_path, 'wb') as f:
+                                for chunk in r.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                        print(f'[COMBINED API] HeyGen video downloaded to: {video_path}')
+                    except Exception as e:
+                        print(f'[COMBINED API] Error downloading HeyGen video for slide {slide_number}: {e}')
+                        return None
+                    # Mute audio and save no-audio file first
+                    heygen_noaudio_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_heygen_noaudio.mp4')
+                    heygen_clip = VideoFileClip(video_path)
+                    noaudio_clip = heygen_clip.without_audio()
+                    noaudio_clip.write_videofile(heygen_noaudio_path, codec='libx264', audio_codec='aac', verbose=False, logger=None)
+                    heygen_clip.close()
+                    noaudio_clip.close()
+                    # Now check for existence and load for overlay
+                    if not os.path.exists(heygen_noaudio_path):
+                        print(f"[HEYGEN OVERLAY WARNING] HeyGen video not found for slide {slide_number}: {heygen_noaudio_path}")
+                        return None
+                    try:
+                        heygen_clip = VideoFileClip(heygen_noaudio_path)
+                    except Exception as e:
+                        print(f"[HEYGEN OVERLAY WARNING] Could not load HeyGen video for slide {slide_number}: {e}")
+                        return None
+                    # --- CROP to center square before resizing ---
+                    w, h = heygen_clip.size
+                    side = min(w, h)
+                    x_center = w // 2
+                    y_center = h // 2
+                    x1 = x_center - side // 2
+                    y1 = y_center - side // 2
+                    heygen_clip_cropped = heygen_clip.crop(x1=x1, y1=y1, x2=x1+side, y2=y1+side)
+
+                    # Resize, subclip, and set duration
+                    heygen_clip_final = heygen_clip_cropped.resize((max_side, max_side))
+                    actual_overlay_duration = min(duration, heygen_clip_final.duration)
+                    heygen_clip_final = heygen_clip_final.subclip(0, actual_overlay_duration)
+                    heygen_clip_final = heygen_clip_final.set_position((x, y)).set_start(start_time).set_duration(actual_overlay_duration)
+
+                    print(f"[DEBUG] Overlaying slide {slide_number}: x={x}, y={y}, size={max_side}, start={start_time}, end={end_time}, base=({base_clip.w},{base_clip.h})")
+                    overlay_clips.append(heygen_clip_final)
+                    return True
+                # Run all HeyGen jobs concurrently
+                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                    futures = [executor.submit(post_and_poll_heygen, slide) for slide in slide_segments]
+                    for future in concurrent.futures.as_completed(futures):
+                        try:
+                            future.result()
+                        except Exception as e:
+                            print(f'[COMBINED API] Exception in HeyGen concurrent job: {e}')
+    except Exception as e:
+        print(f"[COMBINED API] HeyGen overlay generation failed: {e}")
+    return overlay_filename 
+
+# --- Utility: Create HeyGen overlay video using test script logic ---
+def create_heygen_overlay_video(base_video_path, heygen_videos_dir, heygen_empty_spaces_path, segments_json_path, output_path):
+    import json
+    from moviepy.editor import VideoFileClip, CompositeVideoClip
+    import os
+    # Load base video
+    base_clip = VideoFileClip(base_video_path)
+    # Load heygen empty space info
+    with open(heygen_empty_spaces_path, 'r', encoding='utf-8') as f:
+        empty_spaces = json.load(f)
+    # Load segment timing info
+    with open(segments_json_path, 'r', encoding='utf-8') as f:
+        segments_data = json.load(f)
+    segment_map = {seg['segment_id']: seg for seg in segments_data['segments']}
+    # Prepare overlay clips
+    overlay_clips = []
+    for space in empty_spaces:
+        area = space['empty_space']
+        slide_number = space.get('slide_number', 1)
+        segment = segment_map.get(slide_number)
+        if not segment:
+            print(f"[HEYGEN OVERLAY WARNING] No segment timing for slide {slide_number}, skipping overlay.")
+            continue
+        start_time = segment.get('start_time', 0)
+        end_time = segment.get('end_time', base_clip.duration)
+        duration = end_time - start_time
+        empty_w, empty_h = int(area['width']), int(area['height'])
+        max_side = min(empty_w, empty_h)
+        if max_side <= 0:
+            print(f"[HEYGEN OVERLAY WARNING] max_side is {max_side} for slide {slide_number}, skipping overlay.")
+            continue
+        format_type = space.get('format', 2)
+        if format_type == 2:
+            x = area['x']
+        elif format_type == 3:
+            x = area['x'] + empty_w - max_side
+        else:
+            x = area['x']
+        y = area['y']
+        x = max(0, min(x, base_clip.w - max_side))
+        y = max(0, min(y, base_clip.h - max_side))
+        # Find the corresponding heygen overlay video for this slide
+        heygen_video_path = os.path.join(heygen_videos_dir, f'slide_{slide_number}_heygen_noaudio.mp4')
+        if not os.path.exists(heygen_video_path):
+            print(f"[HEYGEN OVERLAY WARNING] No heygen overlay video for slide {slide_number}: {heygen_video_path}")
+            continue
+        heygen_clip_orig = VideoFileClip(heygen_video_path).without_audio()
+        # --- CROP to center square before resizing ---
+        w, h = heygen_clip_orig.size
+        side = min(w, h)
+        x_center = w // 2
+        y_center = h // 2
+        x1 = x_center - side // 2
+        y1 = y_center - side // 2
+        heygen_clip_cropped = heygen_clip_orig.crop(x1=x1, y1=y1, x2=x1+side, y2=y1+side)
+        # Resize, subclip, and set duration
+        heygen_clip = heygen_clip_cropped.resize((max_side, max_side))
+        actual_overlay_duration = min(duration, heygen_clip.duration)
+        heygen_clip = heygen_clip.subclip(0, actual_overlay_duration)
+        heygen_clip = heygen_clip.set_position((x, y)).set_start(start_time).set_duration(actual_overlay_duration)
+        print(f"[DEBUG] Overlaying slide {slide_number}: x={x}, y={y}, size={max_side}, start={start_time}, end={end_time}, base=({base_clip.w},{base_clip.h})")
+        overlay_clips.append(heygen_clip)
+        heygen_clip_orig.close()
+    # Composite overlays onto base video
+    final = CompositeVideoClip([base_clip] + overlay_clips)
+    final.write_videofile(output_path, codec='libx264', audio_codec='aac')
+    print(f"[DONE] Overlay video saved to: {output_path}")
+    base_clip.close()
+    for c in overlay_clips:
+        c.close()
