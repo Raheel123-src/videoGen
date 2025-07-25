@@ -322,9 +322,14 @@ def create_segments_file(segments, output_path):
         previous_format = None
         for i, segment in enumerate(segments):
             percent = int((i+1)/total_segments*100)
-            print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%)", flush=True)
-            slide_json = generate_slide_json_content(segment['text'], i, segment['end'] - segment['start'], previous_format=previous_format)
-            previous_format = slide_json.get('format', previous_format)
+            duration = segment['end'] - segment['start']
+            format_type = segment.get('format', None)
+            print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s, Format: {format_type}", flush=True)
+            slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format)
+            # Overwrite the format in slide_json to match the pre-assigned format
+            if format_type is not None:
+                slide_json['format'] = format_type
+            previous_format = format_type
             slides.append(slide_json)
         
         # Save the slides.json file
@@ -333,7 +338,7 @@ def create_segments_file(segments, output_path):
             json.dump(slides, f, indent=2, ensure_ascii=False)
         print(f"Slides JSON saved: {slides_json_path}")
         
-        # Create segments.json with proper timing keys
+        # Create segments.json with proper timing keys and format
         segments_data = {
             "segments": []
         }
@@ -343,7 +348,8 @@ def create_segments_file(segments, output_path):
                 "start_time": segment['start'],
                 "end_time": segment['end'],
                 "duration": segment['end'] - segment['start'],
-                "text": segment['text']
+                "text": segment['text'],
+                "format": segment.get('format', None)  # Include format field
             }
             segments_data["segments"].append(segment_data)
         

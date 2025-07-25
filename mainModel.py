@@ -26,6 +26,9 @@ import concurrent.futures
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# Import BGM processor
+from bgm_processor import BGMProcessor
+
 # Load environment variables
 load_dotenv()
 
@@ -85,6 +88,10 @@ LEFT_MARGIN = 80
 TOP_MARGIN = 120
 BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
+# --- HeyGen Avatar Configuration ---
+MIN_AVATAR_SIZE = 165  # Minimum avatar size in pixels
+MAX_AVATAR_SIZE = 250  # Maximum avatar size in pixels  
+AVATAR_SAFETY_MARGIN = 20  # Safety margin from text
 BOTTOM_MARGIN = 80
 
 # --- HeyGen Overlay Constants ---
@@ -122,7 +129,9 @@ def wrap_text(text, font, max_width, draw):
 def calculate_empty_space(slide, title_font, body_font):
     format_type = slide.get('format')
     if format_type not in [2, 3]:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: format {format_type} not supported (only 2,3), skipping overlay")
         return None
+    
     title = slide.get('title', '')
     bullets = slide.get('bullets', [])
     max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
@@ -140,14 +149,50 @@ def calculate_empty_space(slide, title_font, body_font):
         y += 24
     bullets_end_y = y
     subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
-    empty_space_top = bullets_end_y
+    
+    # 🎯 FIXED: Always start at the bottom, not where bullets end
+    empty_space_top = subtitle_y - MIN_AVATAR_SIZE - AVATAR_SAFETY_MARGIN
     empty_space_bottom = subtitle_y
     empty_space_height = max(0, empty_space_bottom - empty_space_top)
+    
+    # 🎯 ENHANCED: Check if available height is sufficient for minimum avatar size
+    if empty_space_height < MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: insufficient height ({empty_space_height}px < {MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN}px), skipping overlay")
+        return None
+    
+    # 🎯 FIXED: Correct positioning logic for extreme left/right
     if format_type == 2:
+        # Format 2: Extreme LEFT
         x = LEFT_MARGIN
-    else:
-        x = SLIDE_WIDTH // 2 + LEFT_MARGIN
-    width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+        max_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+        position_info = "EXTREME LEFT"
+    else:  # format_type == 3
+        # Format 3: Extreme RIGHT  
+        x = SLIDE_WIDTH // 2 + (SLIDE_WIDTH // 2 - MIN_AVATAR_SIZE - LEFT_MARGIN)
+        max_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
+        position_info = "EXTREME RIGHT"
+    
+    # 🎯 ENHANCED: Calculate optimal avatar size within our range
+    avatar_size = min(max_width, empty_space_height - AVATAR_SAFETY_MARGIN, MAX_AVATAR_SIZE)
+    avatar_size = max(avatar_size, MIN_AVATAR_SIZE)  # Ensure minimum size
+    
+    # 🎯 ENHANCED: Final size validation with detailed debug
+    if avatar_size < MIN_AVATAR_SIZE:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: calculated avatar too small ({avatar_size}px < {MIN_AVATAR_SIZE}px), skipping overlay")
+        return None
+    elif avatar_size > MAX_AVATAR_SIZE:
+        print(f"[HEYGEN ADJUST] Slide {slide.get('slide_number')}: avatar too large ({avatar_size}px > {MAX_AVATAR_SIZE}px), reducing to {MAX_AVATAR_SIZE}px")
+        avatar_size = MAX_AVATAR_SIZE
+    
+    # Use calculated avatar size
+    width = avatar_size
+    height = avatar_size
+    
+    # 🎯 ENHANCED: Detailed debug information
+    print(f"[HEYGEN CALC] Slide {slide.get('slide_number')}: format={format_type}, position={position_info}")
+    print(f"[HEYGEN CALC] Avatar: size={avatar_size}px, x={x}, y={empty_space_top}")
+    print(f"[HEYGEN CALC] Available: height={empty_space_height}px, max_width={max_width}px")
+    
     return {
         'slide_number': slide.get('slide_number'),
         'format': format_type,
@@ -155,7 +200,7 @@ def calculate_empty_space(slide, title_font, body_font):
             'x': x,
             'y': empty_space_top,
             'width': width,
-            'height': empty_space_height
+            'height': height
         }
     }
 
@@ -530,13 +575,30 @@ Return ONLY the environment prompt, no explanations or additional text.
 def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, target_audience=None):
     client = get_openai_client()
     
-    # Generate dynamic environment prompt based on target audience
+    # Determine audience context for image generation
+    audience_context = ""
     if target_audience:
-        environment_prompt = generate_environment_prompt_for_target_audience(target_audience)
-        print(f"[DEBUG] Generated environment prompt for '{target_audience}': {environment_prompt}")
+        audience_lower = target_audience.lower()
+        if any(word in audience_lower for word in ['sales', 'marketing', 'business', 'corporate', 'professional']):
+            audience_context = "professional business environment, modern office setting, diverse professionals in business attire"
+        elif any(word in audience_lower for word in ['it', 'tech', 'software', 'developer', 'engineer']):
+            audience_context = "technology workspace, modern tech environment, diverse IT professionals, digital workspace"
+        elif any(word in audience_lower for word in ['healthcare', 'medical', 'hospital', 'doctor', 'nurse']):
+            audience_context = "healthcare environment, medical setting, diverse healthcare professionals, clinical atmosphere"
+        elif any(word in audience_lower for word in ['nursery', 'preschool', 'kindergarten', 'early childhood']):
+            audience_context = "child-friendly educational setting, colorful classroom, young children learning, playful atmosphere"
+        elif any(word in audience_lower for word in ['primary', 'elementary', 'grade school']):
+            audience_context = "elementary school classroom, young students learning, educational environment, child-friendly setting"
+        elif any(word in audience_lower for word in ['high school', 'secondary', 'teen']):
+            audience_context = "high school classroom, teenage students, modern educational environment, academic setting"
+        elif any(word in audience_lower for word in ['university', 'college', 'higher education', 'student']):
+            audience_context = "university campus, college students, academic environment, higher education setting"
+        elif any(word in audience_lower for word in ['learner', 'student', 'education']):
+            audience_context = "educational environment, diverse learners, academic setting, learning atmosphere"
+        else:
+            audience_context = "diverse professional environment, modern workplace, inclusive setting"
     else:
-        # Fallback to default Indian corporate environment
-        environment_prompt = "Indian corporate office environment with diverse professionals in formal attire, modern workspace with glass partitions, laptops, indoor plants, natural lighting, professional atmosphere, photorealistic quality"
+        audience_context = "diverse professional environment, modern workplace, inclusive setting"
     
     prompt = f'''
 You are a presentation expert specializing in creating dynamic, context-aware slides.
@@ -554,36 +616,72 @@ Given the following transcript segment and its duration, output a single JSON ob
 - If previous_format is {previous_format}, choose ANY format except {previous_format}
 - Do NOT use format 1 or format 5. Do NOT favor any particular format - truly randomize your choice
 
-**DYNAMIC IMAGE PROMPT REQUIREMENTS:**
-For image_prompt, create highly detailed prompts that:
-- Use the provided environment context: "{environment_prompt}"
-- **Analyze the transcript segment** and extract key themes, emotions, or concepts
-- **Match the image to the slide content** - if the slide talks about stress management, show stressed professionals; if it's about teamwork, show collaborative scenes
-- **Incorporate specific elements** mentioned in the transcript (e.g., if "deadlines" are mentioned, show time pressure scenarios)
-- **Reflect the tone and mood** of the content (calm, energetic, focused, collaborative, etc.)
-- **Integrate the target environment** seamlessly into the scene
+**AUDIENCE-AWARE CONTENT-BASED IMAGE PROMPT REQUIREMENTS:**
+For image_prompt, create highly detailed prompts that combine the slide content with the target audience context:
 
-**Image Prompt Structure:**
-Combine the environment context with the slide content to create a cohesive scene. For example:
-- If transcript talks about "team collaboration" and environment is "manufacturing unit": "Team of manufacturing professionals collaborating around production line, {environment_prompt}, focused expressions, teamwork atmosphere"
-- If transcript talks about "stress management" and environment is "hospital": "Healthcare professionals in stress management training session, {environment_prompt}, calm and focused atmosphere"
+**TARGET AUDIENCE CONTEXT:**
+Target Audience: {target_audience or "General professional"}
+Audience Environment: {audience_context}
+
+**ANALYZE THE TRANSCRIPT SEGMENT:**
+- Extract the main topic, theme, or concept being discussed
+- Identify key emotions, actions, or scenarios mentioned
+- Look for specific objects, processes, or situations described
+- Understand the tone and mood of the content
+
+**CREATE AUDIENCE-APPROPRIATE IMAGE PROMPT:**
+**PROFESSIONAL AUDIENCES (Sales, Marketing, IT, Healthcare, etc.):**
+- **Content-focused with professional context** - if the slide talks about "brain function", show brain imagery in a professional setting
+- **Use specific elements** mentioned in the transcript with professional environment integration
+- **Maintain professional atmosphere** while being content-specific
+- **Include diverse professionals** appropriate to the target audience
+- **Professional setting integration** - if discussing "stress management", show stress-related visuals in the appropriate professional environment
+
+**EDUCATIONAL AUDIENCES (Students, Learners, etc.):**
+- **Content-focused with educational context** - if the slide talks about "brain function", show brain imagery in an educational setting
+- **Age-appropriate visuals** - use simpler, more colorful visuals for younger audiences
+- **Educational environment integration** - show learning scenarios, classroom settings when appropriate
+- **Student-friendly atmosphere** - make complex topics accessible and engaging
+- **Interactive learning elements** - include educational tools, books, technology when relevant
+
+**Image Prompt Examples by Audience:**
+
+**For Sales/Marketing Professionals:**
+- If transcript talks about "brain neurons firing": "Professional business meeting with brain visualization on screen, diverse sales professionals in modern office, neural network diagrams, photorealistic, corporate setting"
+- If transcript talks about "stress management": "Sales team in stress management workshop, modern conference room, professional atmosphere, diverse business professionals, photorealistic"
+
+**For IT/Technology Professionals:**
+- If transcript talks about "brain neurons firing": "Tech workspace with brain visualization on multiple screens, diverse IT professionals, neural network diagrams, modern office, photorealistic"
+- If transcript talks about "stress management": "IT team in stress management session, modern tech office, diverse tech professionals, digital workspace, photorealistic"
+
+**For Healthcare Professionals:**
+- If transcript talks about "brain neurons firing": "Medical conference room with brain visualization, diverse healthcare professionals, neural network medical diagrams, clinical setting, photorealistic"
+- If transcript talks about "stress management": "Healthcare team in stress management training, medical environment, diverse medical professionals, clinical atmosphere, photorealistic"
+
+**For High School Students:**
+- If transcript talks about "brain neurons firing": "High school science classroom with brain model, teenage students learning, neural network diagrams on whiteboard, educational setting, photorealistic"
+- If transcript talks about "stress management": "High school students in stress management workshop, modern classroom, diverse teenage learners, educational atmosphere, photorealistic"
+
+**For Primary School Students:**
+- If transcript talks about "brain neurons firing": "Colorful elementary classroom with simple brain model, young children learning, friendly neural network illustrations, child-friendly setting, photorealistic"
+- If transcript talks about "stress management": "Young students in stress management activity, colorful classroom, diverse young learners, playful educational atmosphere, photorealistic"
 
 **Quality Requirements:**
-- **Photorealistic, professional** visuals only
-- Avoid cartoon or generic visuals
-- Vary people and angles slightly across slides while maintaining realism
-- No logos or copyrighted branding
-- **Ensure the image directly supports** the slide's educational or professional development message
-- **Seamlessly integrate** the target environment with the slide content
+- **Photorealistic, audience-appropriate** visuals
+- **Content-specific imagery** that directly relates to the transcript
+- **Audience-appropriate setting** and context
+- **Diverse representation** appropriate to the target audience
+- **Professional or educational atmosphere** as appropriate
+- **Age-appropriate complexity** for educational audiences
 
 **Example image_prompt format:**
-"Team of manufacturing professionals collaborating around production line, {environment_prompt}, focused expressions, teamwork atmosphere, photorealistic, 1024x1024"
+"[Content-specific visualization] in [audience-appropriate setting], [diverse audience-appropriate people], [relevant environment details], photorealistic, high quality"
 
 Transcript:
 """{segment_text}"""
 Duration: {segment_duration:.2f} seconds
 Title: {segment_title or f"Slide {segment_index+1}"}
-Target Environment: {target_audience or "General corporate"}
+Target Audience: {target_audience or "General professional"}
 '''
     def try_parse_json(raw):
         import json
@@ -628,25 +726,25 @@ Target Environment: {target_audience or "General corporate"}
 # Function to create slides.json from segments
 
 def create_slides_json_from_segments(segments, slides_json_path, target_audience=None):
-    """Create slides.json from pre-created segments"""
+    """Create slides.json from pre-created segments (with 'format' field)"""
     slides = []
     total_segments = len(segments)
     previous_format = None
-    
     print(f"[DEBUG] Creating {total_segments} slides from segments")
     if target_audience:
         print(f"[DEBUG] Using target audience: {target_audience}")
-    
     for i, segment in enumerate(segments):
         percent = int((i+1)/total_segments*100)
         duration = segment['end'] - segment['start']
-        print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s", flush=True)
+        format_type = segment.get('format', None)
+        print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s, Format: {format_type}", flush=True)
         slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format, target_audience=target_audience)
-        previous_format = slide_json.get('format', previous_format)
+        # Overwrite the format in slide_json to match the pre-assigned format
+        if format_type is not None:
+            slide_json['format'] = format_type
+        previous_format = format_type
         slides.append(slide_json)
-    
     print(f"[DEBUG] Created {len(slides)} slides from segments")
-    
     with open(slides_json_path, 'w', encoding='utf-8') as f:
         import json
         json.dump(slides, f, indent=2, ensure_ascii=False)
@@ -1166,7 +1264,9 @@ async def process_and_generate_video(
     video_name: str = Form(...),
     show_subtitles: str = Form("true"),
     target_audience: Optional[str] = Form(None),
-    heygen_avatar_id: Optional[str] = Form(None)
+    heygen_avatar_id: Optional[str] = Form(None),
+    bgm_volume: Optional[int] = Form(50),  # BGM volume (1-100)
+    bgm_crossfade: Optional[int] = Form(2000)  # Crossfade duration in milliseconds
 ):
     session_id = f"{video_name}_{uuid.uuid4().hex[:8]}"
     job_status[session_id] = {"status": "pending", "result": None, "error": None}
@@ -1262,14 +1362,13 @@ async def process_and_generate_video(
             # If SRT correction was run, create slides and segments from corrected SRT
             if script:
                 print("[DEBUG] Creating slides and segments from GPT-corrected SRT content...")
-                create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=target_audience)
-                # Also create segments.json from corrected SRT
                 corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
-                audio_segments = create_audio_segments(corrected_segments, 15)
+                audio_segments = segment_transcript_variable_duration(corrected_segments)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
             else:
                 # Use original transcription for slides and segments
                 print("[DEBUG] Creating slides and segments from original transcription...")
-                audio_segments = create_audio_segments(sentence_segments, 15)
+                audio_segments = segment_transcript_variable_duration(sentence_segments)
                 create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
             # Create segments.json for video generation (always use the segments from above)
             segments_filename = f"{base_filename}_segments.json"
@@ -1281,7 +1380,8 @@ async def process_and_generate_video(
                         "start_time": seg["start"] if isinstance(seg, dict) and "start" in seg else 0,
                         "end_time": seg["end"] if isinstance(seg, dict) and "end" in seg else 0,
                         "duration": (seg["end"] - seg["start"]) if isinstance(seg, dict) and "end" in seg and "start" in seg else 0,
-                        "text": seg["text"] if isinstance(seg, dict) and "text" in seg else ""
+                        "text": seg["text"] if isinstance(seg, dict) and "text" in seg else "",
+                        "format": seg.get("format", None)
                     } for i, seg in enumerate(audio_segments) if isinstance(seg, dict)
                 ]
             }
@@ -1306,6 +1406,27 @@ async def process_and_generate_video(
                     print(f"[COMBINED API] Highlight addition failed")
             except Exception as e:
                 print(f"[COMBINED API] Highlight script failed: {e}")
+            
+            # --- BGM Processing ---
+            print(f"[COMBINED API] Starting BGM processing...")
+            try:
+                # Process BGM directly (since we're already in a background thread)
+                bgm_processed_audio_path = process_bgm_audio(
+                    original_audio_path=filepath,
+                    transcription_file=srt_filepath,
+                    segments_file=segments_filepath,
+                    bgm_volume=bgm_volume,  # Use user-provided BGM volume
+                    crossfade_duration=bgm_crossfade  # Use user-provided crossfade duration
+                )
+                
+                # Use processed audio for video generation
+                video_audio_path = bgm_processed_audio_path
+                print(f"[COMBINED API] BGM processing completed, using: {video_audio_path}")
+                
+            except Exception as e:
+                print(f"[COMBINED API] BGM processing failed, using original audio: {e}")
+                video_audio_path = filepath
+            
             print(f"[COMBINED API] Generating video...")
             # Always use 1.jpg as background
             selected_bg = '1.jpg'
@@ -1315,7 +1436,7 @@ async def process_and_generate_video(
                 font_folder='circular-std-font-family'
             )
             output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
-            video_gen.generate_video(segments_filepath, word_srt_filepath, filepath, output_video, 
+            video_gen.generate_video(segments_filepath, word_srt_filepath, video_audio_path, output_video, 
                                    show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
             print(f"[COMBINED API] Video generated successfully: {output_video}")
             
@@ -1326,7 +1447,7 @@ async def process_and_generate_video(
             heygen_overlay_result = overlay_heygen_avatars(
                 heygen_empty_spaces_path=heygen_empty_spaces_path,
                 segments_filepath=segments_filepath,
-                filepath=filepath,
+                filepath=video_audio_path,  # Use processed audio for HeyGen
                 session_uploads=session_uploads,
                 session_segments=session_segments,
                 session_id=session_id,
@@ -1481,9 +1602,19 @@ def overlay_heygen_avatars(
                     area = slide['empty_space']
                     empty_w, empty_h = int(area['width']), int(area['height'])
                     max_side = min(empty_w, empty_h)
+                    
+                    # 🎯 ENHANCED: Check for minimum and maximum size
                     if max_side <= 0:
                         print(f"[HEYGEN OVERLAY WARNING] max_side is {max_side} for slide {slide_number}, skipping overlay.")
                         return None
+                    elif max_side < MIN_AVATAR_SIZE:
+                        print(f"[HEYGEN OVERLAY SKIP] Avatar too small ({max_side}px < {MIN_AVATAR_SIZE}px) for slide {slide_number}, skipping overlay.")
+                        return None
+                    elif max_side > MAX_AVATAR_SIZE:
+                        print(f"[HEYGEN OVERLAY ADJUST] Avatar too large ({max_side}px > {MAX_AVATAR_SIZE}px) for slide {slide_number}, reducing to {MAX_AVATAR_SIZE}px")
+                        max_side = MAX_AVATAR_SIZE
+                    
+                    print(f"[HEYGEN PROCESS] Slide {slide_number}: processing avatar with size {max_side}px")
                     segment_audio = AudioSegment.from_file(audio_file_path)[start_time * 1000:end_time * 1000]
                     segment_path = os.path.join(heygen_output_dir, f'slide_{slide_number}_audio.mp3')
                     segment_audio.export(segment_path, format='mp3')
@@ -1696,3 +1827,98 @@ def create_heygen_overlay_video(base_video_path, heygen_videos_dir, heygen_empty
     base_clip.close()
     for c in overlay_clips:
         c.close()
+
+def process_bgm_audio(original_audio_path: str, transcription_file: str, segments_file: str, bgm_volume: int = 50, crossfade_duration: int = 2000) -> str:
+    """
+    Process audio with BGM overlay in a separate thread
+    """
+    try:
+        print(f"[BGM] Starting BGM processing for: {original_audio_path}")
+        processor = BGMProcessor()
+        
+        # Process audio with BGM
+        processed_audio_path = processor.process_audio_with_bgm(
+            original_audio_path=original_audio_path,
+            transcription_file=transcription_file,
+            segments_json_path=segments_file,
+            bgm_volume=bgm_volume,
+            crossfade_duration=crossfade_duration
+        )
+        
+        print(f"[BGM] BGM processing completed: {processed_audio_path}")
+        return processed_audio_path
+        
+    except Exception as e:
+        print(f"[BGM] Error processing BGM: {e}")
+        # Return original audio path if BGM processing fails
+        return original_audio_path
+
+def create_session_directories(session_id: str):
+    """Create unique directories for each request session to handle concurrency"""
+    session_uploads = os.path.join(UPLOAD_FOLDER, session_id)
+    session_transcripts = os.path.join(TRANSCRIPTS_FOLDER, session_id)
+    session_segments = os.path.join(SEGMENTS_FOLDER, session_id)
+    
+    for folder in [session_uploads, session_transcripts, session_segments]:
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+    
+    return session_uploads, session_transcripts, session_segments
+
+def segment_transcript_variable_duration(sentence_segments):
+    """
+    Segment transcript into variable-length segments based on assigned format:
+    - Format 4: 5-8 seconds
+    - Format 2 or 3: 10-20 seconds (based on word count/complexity)
+    Ensures no consecutive formats are the same.
+    Returns a list of dicts: {start, end, text, format}
+    """
+    if not sentence_segments:
+        return []
+    total_duration = sentence_segments[-1]['end']
+    segments = []
+    segment_start = 0
+    previous_format = None
+    i = 0
+    while segment_start < total_duration:
+        # Assign format (2, 3, or 4), not repeating previous
+        possible_formats = [2, 3, 4]
+        if previous_format in possible_formats:
+            possible_formats.remove(previous_format)
+        format_type = random.choice(possible_formats)
+        # Pick duration range based on format
+        if format_type == 4:
+            min_dur, max_dur = 5, 8
+        else:
+            min_dur, max_dur = 10, 20
+        # Try to pick a segment that fits the duration and ends at a sentence boundary
+        segment_end = min(segment_start + max_dur, total_duration)
+        # Find the last sentence that ends before or at segment_end, but after min_dur
+        best_end = None
+        for s in sentence_segments:
+            if s['end'] <= segment_end and s['end'] - segment_start >= min_dur:
+                best_end = s['end']
+            if s['end'] > segment_end:
+                break
+        if best_end is None:
+            # If no suitable end found, just use min(segment_start+min_dur, total_duration)
+            best_end = min(segment_start + min_dur, total_duration)
+        # Collect text for this segment
+        segment_text = ''
+        for s in sentence_segments:
+            if s['start'] < best_end and s['end'] > segment_start:
+                if segment_text:
+                    segment_text += ' ' + s['text']
+                else:
+                    segment_text = s['text']
+        if segment_text.strip():
+            segments.append({
+                'start': segment_start,
+                'end': best_end,
+                'text': segment_text.strip(),
+                'format': format_type
+            })
+            previous_format = format_type
+        segment_start = best_end
+        i += 1
+    return segments

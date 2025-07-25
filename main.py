@@ -22,6 +22,7 @@ import uuid
 from dotenv import load_dotenv
 import requests
 import difflib
+from mainModel import segment_transcript_variable_duration
 
 load_dotenv()
 
@@ -159,7 +160,7 @@ async def process_and_generate_video(
         word_srt_filepath = os.path.join(TRANSCRIPTS_FOLDER, word_srt_filename)
         create_word_srt_file(word_segments, word_srt_filepath)
         # Create segments file
-        audio_segments = create_audio_segments(sentence_segments, 15)
+        audio_segments = segment_transcript_variable_duration(sentence_segments)
         segments_filename = f"{base_filename}_segments.json"
         segments_filepath = os.path.join(SEGMENTS_FOLDER, segments_filename)
         create_segments_file(audio_segments, segments_filepath)
