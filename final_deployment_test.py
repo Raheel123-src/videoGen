@@ -76,7 +76,7 @@ def test_variable_duration_segmentation():
         print(f"Test segments created: {len(test_segments)} segments")
         
         # Test segmentation
-        result = segment_transcript_variable_duration(test_segments)
+        result = segment_transcript_variable_duration(test_segments, audio_duration=55.0)
         
         print(f"Segmentation result: {len(result)} segments")
         

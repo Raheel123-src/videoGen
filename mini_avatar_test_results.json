@@ -1,0 +1,37 @@
+[
+  null,
+  {
+    "slide_number": 2,
+    "format": 3,
+    "empty_space": {
+      "x": 1040,
+      "y": 566,
+      "width": 250,
+      "height": 250
+    },
+    "debug_info": {
+      "text_end_y": 526,
+      "available_height": 374,
+      "min_required": 70,
+      "subtitle_y": 940
+    }
+  },
+  {
+    "slide_number": 3,
+    "format": 2,
+    "empty_space": {
+      "x": 80,
+      "y": 430,
+      "width": 250,
+      "height": 250
+    },
+    "debug_info": {
+      "text_end_y": 390,
+      "available_height": 510,
+      "min_required": 70,
+      "subtitle_y": 940
+    }
+  },
+  null,
+  null
+]

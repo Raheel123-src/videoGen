@@ -146,7 +146,7 @@ async def process_and_generate_video(
             return JSONResponse({"error": "Audio file not found after upload/generation."}, status_code=500)
         # Transcribe audio
         print(f"[COMBINED API] Transcribing audio...")
-        sentence_segments, word_segments = transcribe_audio(filepath)
+        sentence_segments, word_segments, audio_duration = transcribe_audio(filepath)
         # If both audio and script are provided, correct transcript using script
         if audio_file and script:
             proper_nouns = extract_proper_nouns(script)
@@ -160,7 +160,7 @@ async def process_and_generate_video(
         word_srt_filepath = os.path.join(TRANSCRIPTS_FOLDER, word_srt_filename)
         create_word_srt_file(word_segments, word_srt_filepath)
         # Create segments file
-        audio_segments = segment_transcript_variable_duration(sentence_segments)
+        audio_segments = segment_transcript_variable_duration(sentence_segments, audio_duration=audio_duration)
         segments_filename = f"{base_filename}_segments.json"
         segments_filepath = os.path.join(SEGMENTS_FOLDER, segments_filename)
         create_segments_file(audio_segments, segments_filepath)

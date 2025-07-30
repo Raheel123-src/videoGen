@@ -18,7 +18,7 @@ class BGMProcessor:
         self.theme_folders = {
             "Hook": "Start HOOK",
             "What": "WHAT", 
-            "Why": "WHY ",  # Note the trailing space
+            "Why": "WHY",  # Fixed: removed trailing space
             "How": "HOW",
             "Ending Hook": "End HOOK"
         }

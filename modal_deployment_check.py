@@ -54,7 +54,7 @@ def test_core_functionality():
             {'start': 18, 'end': 25, 'text': 'Test sentence 4 with additional content.'}
         ]
         
-        result = segment_transcript_variable_duration(test_segments)
+        result = segment_transcript_variable_duration(test_segments, audio_duration=25.0)
         
         # Validate results
         valid_formats = [2, 3, 4]

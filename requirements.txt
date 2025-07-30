@@ -11,3 +11,6 @@ moviepy>=1.0.0
 numpy>=1.21.0 
 boto3>=1.34.0 
 modal>=1.0.0
+psutil>=5.9.0
+botocore>=1.34.0
+# supabase>=2.0.0  # Removed - using container concurrency for session management

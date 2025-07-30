@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Import BGM processor
 from bgm_processor import BGMProcessor
 
+# Supabase integration removed - using container concurrency for session management
+
 # Load environment variables
 load_dotenv()
 
@@ -89,7 +91,7 @@ TOP_MARGIN = 120
 BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
 # --- HeyGen Avatar Configuration ---
-MIN_AVATAR_SIZE = 165  # Minimum avatar size in pixels
+MIN_AVATAR_SIZE = 185  # Minimum avatar size in pixels
 MAX_AVATAR_SIZE = 250  # Maximum avatar size in pixels  
 AVATAR_SAFETY_MARGIN = 20  # Safety margin from text
 BOTTOM_MARGIN = 80
@@ -134,6 +136,11 @@ def calculate_empty_space(slide, title_font, body_font):
     
     title = slide.get('title', '')
     bullets = slide.get('bullets', [])
+    
+    # 🎯 NEW RULE: Skip HeyGen avatar if slide has more than 4 bullets
+    if len(bullets) > 4:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: too many bullets ({len(bullets)} > 4), skipping overlay")
+        return None
     max_text_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
     img = Image.new('RGB', (SLIDE_WIDTH, SLIDE_HEIGHT))
     draw = ImageDraw.Draw(img)
@@ -292,16 +299,49 @@ def transcribe_audio(audio_path):
                             'end': word_end,
                             'text': word.strip()
                         })
-            return sentence_segments, word_segments
+            # Get the actual audio duration from the words
+            audio_duration = result.words[-1].end if result.words else 0
+            print(f"[DEBUG] Audio duration from words: {audio_duration:.2f}s")
+            
+            return sentence_segments, word_segments, audio_duration
         # If segments is None but words and text are present, use those
         elif hasattr(result, 'words') and result.words and hasattr(result, 'text') and result.text:
             print("[DEBUG] Falling back to words/text fields for sentence/word segments.")
-            # Treat the whole text as one segment
-            sentence_segments = [{
-                'start': result.words[0].start if result.words else 0,
-                'end': result.words[-1].end if result.words else 0,
-                'text': result.text.strip()
-            }]
+            
+            # Get the actual audio duration from the words
+            audio_duration = result.words[-1].end if result.words else 0
+            print(f"[DEBUG] Audio duration from words: {audio_duration:.2f}s")
+            
+            # Split the text into sentences and create sentence segments
+            import re
+            sentences = re.split(r'[.!?]+', result.text.strip())
+            sentences = [s.strip() for s in sentences if s.strip()]
+            
+            if sentences:
+                # Distribute sentences across the audio duration
+                sentence_segments = []
+                time_per_sentence = audio_duration / len(sentences)
+                
+                for i, sentence in enumerate(sentences):
+                    start_time = i * time_per_sentence
+                    end_time = (i + 1) * time_per_sentence
+                    sentence_segments.append({
+                        'start': start_time,
+                        'end': end_time,
+                        'text': sentence
+                    })
+                
+                print(f"[DEBUG] Created {len(sentence_segments)} sentence segments from words/text fallback")
+            else:
+                # If no sentences found, create one segment spanning the entire duration
+                sentence_segments = [{
+                    'start': result.words[0].start if result.words else 0,
+                    'end': result.words[-1].end if result.words else 0,
+                    'text': result.text.strip()
+                }]
+                print("[DEBUG] Created single sentence segment from words/text fallback")
+            
+            # Create word segments from the words
             word_segments = []
             for word in result.words:
                 word_segments.append({
@@ -309,7 +349,8 @@ def transcribe_audio(audio_path):
                     'end': word.end,
                     'text': word.word.strip()
                 })
-            return sentence_segments, word_segments
+            
+            return sentence_segments, word_segments, audio_duration
         else:
             print("[DEBUG] No segments or words found in Whisper API response.")
             print("[DEBUG] Full API response:", result)
@@ -575,31 +616,6 @@ Return ONLY the environment prompt, no explanations or additional text.
 def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, target_audience=None):
     client = get_openai_client()
     
-    # Determine audience context for image generation
-    audience_context = ""
-    if target_audience:
-        audience_lower = target_audience.lower()
-        if any(word in audience_lower for word in ['sales', 'marketing', 'business', 'corporate', 'professional']):
-            audience_context = "professional business environment, modern office setting, diverse professionals in business attire"
-        elif any(word in audience_lower for word in ['it', 'tech', 'software', 'developer', 'engineer']):
-            audience_context = "technology workspace, modern tech environment, diverse IT professionals, digital workspace"
-        elif any(word in audience_lower for word in ['healthcare', 'medical', 'hospital', 'doctor', 'nurse']):
-            audience_context = "healthcare environment, medical setting, diverse healthcare professionals, clinical atmosphere"
-        elif any(word in audience_lower for word in ['nursery', 'preschool', 'kindergarten', 'early childhood']):
-            audience_context = "child-friendly educational setting, colorful classroom, young children learning, playful atmosphere"
-        elif any(word in audience_lower for word in ['primary', 'elementary', 'grade school']):
-            audience_context = "elementary school classroom, young students learning, educational environment, child-friendly setting"
-        elif any(word in audience_lower for word in ['high school', 'secondary', 'teen']):
-            audience_context = "high school classroom, teenage students, modern educational environment, academic setting"
-        elif any(word in audience_lower for word in ['university', 'college', 'higher education', 'student']):
-            audience_context = "university campus, college students, academic environment, higher education setting"
-        elif any(word in audience_lower for word in ['learner', 'student', 'education']):
-            audience_context = "educational environment, diverse learners, academic setting, learning atmosphere"
-        else:
-            audience_context = "diverse professional environment, modern workplace, inclusive setting"
-    else:
-        audience_context = "diverse professional environment, modern workplace, inclusive setting"
-    
     prompt = f'''
 You are a presentation expert specializing in creating dynamic, context-aware slides.
 
@@ -616,72 +632,60 @@ Given the following transcript segment and its duration, output a single JSON ob
 - If previous_format is {previous_format}, choose ANY format except {previous_format}
 - Do NOT use format 1 or format 5. Do NOT favor any particular format - truly randomize your choice
 
-**AUDIENCE-AWARE CONTENT-BASED IMAGE PROMPT REQUIREMENTS:**
-For image_prompt, create highly detailed prompts that combine the slide content with the target audience context:
+**SLIDE-CONTENT-FOCUSED IMAGE GENERATION:**
 
-**TARGET AUDIENCE CONTEXT:**
-Target Audience: {target_audience or "General professional"}
-Audience Environment: {audience_context}
+**PRINCIPLE: The image should directly represent what the slide is talking about.**
 
-**ANALYZE THE TRANSCRIPT SEGMENT:**
-- Extract the main topic, theme, or concept being discussed
-- Identify key emotions, actions, or scenarios mentioned
-- Look for specific objects, processes, or situations described
-- Understand the tone and mood of the content
+**ANALYZE THE SLIDE CONTENT:**
+- What is the main topic being discussed?
+- What specific objects, concepts, or processes are mentioned?
+- What would help the audience understand this content visually?
 
-**CREATE AUDIENCE-APPROPRIATE IMAGE PROMPT:**
-**PROFESSIONAL AUDIENCES (Sales, Marketing, IT, Healthcare, etc.):**
-- **Content-focused with professional context** - if the slide talks about "brain function", show brain imagery in a professional setting
-- **Use specific elements** mentioned in the transcript with professional environment integration
-- **Maintain professional atmosphere** while being content-specific
-- **Include diverse professionals** appropriate to the target audience
-- **Professional setting integration** - if discussing "stress management", show stress-related visuals in the appropriate professional environment
+**CREATE IMAGE PROMPT:**
+- **Focus on the actual content** of the slide
+- **Show what the slide is talking about**
+- **Make it appropriate for the target audience** (simpler for younger audiences, more detailed for professionals)
+- **Use clear, high-quality visuals** that help explain the content
 
-**EDUCATIONAL AUDIENCES (Students, Learners, etc.):**
-- **Content-focused with educational context** - if the slide talks about "brain function", show brain imagery in an educational setting
-- **Age-appropriate visuals** - use simpler, more colorful visuals for younger audiences
-- **Educational environment integration** - show learning scenarios, classroom settings when appropriate
-- **Student-friendly atmosphere** - make complex topics accessible and engaging
-- **Interactive learning elements** - include educational tools, books, technology when relevant
+**TARGET AUDIENCE: {target_audience or "General professional"}**
 
-**Image Prompt Examples by Audience:**
+**AUDIENCE ADJUSTMENTS:**
+- **Professional/Adult**: Detailed, clean, professional quality
+- **High School**: Clear, educational, age-appropriate detail
+- **Elementary**: Simple, colorful, easy to understand
+- **University**: Academic, comprehensive, detailed
 
-**For Sales/Marketing Professionals:**
-- If transcript talks about "brain neurons firing": "Professional business meeting with brain visualization on screen, diverse sales professionals in modern office, neural network diagrams, photorealistic, corporate setting"
-- If transcript talks about "stress management": "Sales team in stress management workshop, modern conference room, professional atmosphere, diverse business professionals, photorealistic"
+**EXAMPLES:**
 
-**For IT/Technology Professionals:**
-- If transcript talks about "brain neurons firing": "Tech workspace with brain visualization on multiple screens, diverse IT professionals, neural network diagrams, modern office, photorealistic"
-- If transcript talks about "stress management": "IT team in stress management session, modern tech office, diverse tech professionals, digital workspace, photorealistic"
+**Slide Content:** "The brain processes information through neural networks."
+**Image Prompt:** "Brain neural network diagram, detailed neural connections, information processing visualization, professional quality, photorealistic"
 
-**For Healthcare Professionals:**
-- If transcript talks about "brain neurons firing": "Medical conference room with brain visualization, diverse healthcare professionals, neural network medical diagrams, clinical setting, photorealistic"
-- If transcript talks about "stress management": "Healthcare team in stress management training, medical environment, diverse medical professionals, clinical atmosphere, photorealistic"
+**Slide Content:** "Supply chains connect manufacturers to consumers."
+**Image Prompt:** "Supply chain flowchart, manufacturing to consumer process, business connection diagram, professional quality, photorealistic"
 
-**For High School Students:**
-- If transcript talks about "brain neurons firing": "High school science classroom with brain model, teenage students learning, neural network diagrams on whiteboard, educational setting, photorealistic"
-- If transcript talks about "stress management": "High school students in stress management workshop, modern classroom, diverse teenage learners, educational atmosphere, photorealistic"
+**Slide Content:** "Photosynthesis converts sunlight into energy."
+**Image Prompt:** "Plant photosynthesis diagram, sunlight to energy conversion, natural process visualization, professional quality, photorealistic"
 
-**For Primary School Students:**
-- If transcript talks about "brain neurons firing": "Colorful elementary classroom with simple brain model, young children learning, friendly neural network illustrations, child-friendly setting, photorealistic"
-- If transcript talks about "stress management": "Young students in stress management activity, colorful classroom, diverse young learners, playful educational atmosphere, photorealistic"
+**Slide Content:** "Customer feedback improves product quality."
+**Image Prompt:** "Customer feedback loop diagram, product improvement process, quality enhancement visualization, professional quality, photorealistic"
 
-**Quality Requirements:**
-- **Photorealistic, audience-appropriate** visuals
-- **Content-specific imagery** that directly relates to the transcript
-- **Audience-appropriate setting** and context
-- **Diverse representation** appropriate to the target audience
-- **Professional or educational atmosphere** as appropriate
-- **Age-appropriate complexity** for educational audiences
+**QUALITY REQUIREMENTS:**
+- **Directly related to slide content**
+- **Clear, understandable visuals**
+- **High-quality, photorealistic**
+- **Appropriate complexity for target audience**
+- **No generic people or office scenes**
 
-**Example image_prompt format:**
-"[Content-specific visualization] in [audience-appropriate setting], [diverse audience-appropriate people], [relevant environment details], photorealistic, high quality"
+**YOUR TASK:**
+Analyze this slide content and create an image prompt that directly represents what the slide is talking about:
 
 Transcript:
 """{segment_text}"""
 Duration: {segment_duration:.2f} seconds
 Title: {segment_title or f"Slide {segment_index+1}"}
 Target Audience: {target_audience or "General professional"}
+
+Create an image prompt that shows exactly what this slide is discussing, with appropriate complexity for the target audience.
 '''
     def try_parse_json(raw):
         import json
@@ -815,7 +819,7 @@ def parse_timestamp_to_seconds(timestamp):
     except:
         return 0.0
 
-def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=None):
+def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=None, audio_duration=None):
     """Create slides.json from corrected SRT content with smart segment logic"""
     print("[DEBUG] Creating slides from corrected SRT content...")
     if target_audience:
@@ -828,8 +832,14 @@ def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_pa
     if not corrected_segments:
         print("[WARNING] No segments found in corrected SRT")
         return
-        
-    total_duration = corrected_segments[-1]['end']
+    
+    # Use audio_duration if provided, otherwise use SRT duration
+    if audio_duration is not None:
+        print(f"[DEBUG] Using provided audio duration: {audio_duration:.2f}s")
+        total_duration = audio_duration
+    else:
+        total_duration = corrected_segments[-1]['end']
+        print(f"[DEBUG] Using SRT duration: {total_duration:.2f}s")
     slides = []
     segment_start = 0
     segment_index = 0
@@ -1331,7 +1341,7 @@ async def process_and_generate_video(
                 job_status[session_id]["error"] = "Audio file not found after upload/generation."
                 return
             print(f"[COMBINED API] Transcribing audio...")
-            sentence_segments, word_segments = transcribe_audio(filepath)
+            sentence_segments, word_segments, audio_duration = transcribe_audio(filepath)
             base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
             srt_filename = f"{base_filename}_sentences.srt"
             srt_filepath = os.path.join(session_transcripts, srt_filename)
@@ -1363,12 +1373,12 @@ async def process_and_generate_video(
             if script:
                 print("[DEBUG] Creating slides and segments from GPT-corrected SRT content...")
                 corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
-                audio_segments = segment_transcript_variable_duration(corrected_segments)
+                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration)
                 create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
             else:
                 # Use original transcription for slides and segments
                 print("[DEBUG] Creating slides and segments from original transcription...")
-                audio_segments = segment_transcript_variable_duration(sentence_segments)
+                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration)
                 create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
             # Create segments.json for video generation (always use the segments from above)
             segments_filename = f"{base_filename}_segments.json"
@@ -1430,15 +1440,48 @@ async def process_and_generate_video(
             print(f"[COMBINED API] Generating video...")
             # Always use 1.jpg as background
             selected_bg = '1.jpg'
+            
+            print(f"[COMBINED API] Initializing VideoGenerator...")
             video_gen = VideoGenerator(
                 segments_folder=session_segments,
                 transcripts_folder=session_transcripts,
                 font_folder='circular-std-font-family'
             )
+            
             output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
-            video_gen.generate_video(segments_filepath, word_srt_filepath, video_audio_path, output_video, 
-                                   show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
-            print(f"[COMBINED API] Video generated successfully: {output_video}")
+            print(f"[COMBINED API] Output video path: {output_video}")
+            print(f"[COMBINED API] Input files:")
+            print(f"[COMBINED API]   - Segments: {segments_filepath}")
+            print(f"[COMBINED API]   - Word SRT: {word_srt_filepath}")
+            print(f"[COMBINED API]   - Audio: {video_audio_path}")
+            print(f"[COMBINED API]   - Background: {selected_bg}")
+            print(f"[COMBINED API]   - Show subtitles: {show_subtitles.lower() == 'true'}")
+            
+            print(f"[COMBINED API] Starting video generation...")
+            import time
+            video_start_time = time.time()
+            
+            try:
+                video_gen.generate_video(segments_filepath, word_srt_filepath, video_audio_path, output_video, 
+                                       show_subtitles=(show_subtitles.lower() == 'true'), selected_background=selected_bg)
+                video_time = time.time() - video_start_time
+                print(f"[COMBINED API] Video generation completed successfully in {video_time:.2f}s")
+                print(f"[COMBINED API] Video generated successfully: {output_video}")
+                
+                # Check if file was actually created
+                if os.path.exists(output_video):
+                    file_size = os.path.getsize(output_video) / (1024*1024)  # MB
+                    print(f"[COMBINED API] Video file created: {file_size:.2f} MB")
+                else:
+                    print(f"[COMBINED API][ERROR] Video file not found after generation!")
+                    
+            except Exception as e:
+                video_time = time.time() - video_start_time
+                print(f"[COMBINED API][ERROR] Video generation failed after {video_time:.2f}s: {e}")
+                import traceback
+                print(f"[COMBINED API][ERROR] Full traceback:")
+                traceback.print_exc()
+                raise
             
             # --- Calculate and save heygen_empty_spaces.json ---
             heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
@@ -1487,8 +1530,12 @@ async def process_and_generate_video(
                 heygen_overlay_filename = os.path.basename(heygen_overlay_video_path)
                 heygen_overlay_s3_url = upload_video_to_s3(heygen_overlay_video_path, heygen_overlay_filename)
             
+            # Store final result in Supabase when everything completes successfully
+            # Session result stored in memory (container concurrency)
+            print(f"✅ Session {session_id} completed successfully")
+            
             # Clean up session files after successful upload
-            # cleanup_session_files(session_id)
+            cleanup_session_files(session_id)
             
             job_status[session_id]["status"] = "done"
             job_status[session_id]["result"] = {
@@ -1500,24 +1547,155 @@ async def process_and_generate_video(
                 'session_id': session_id
             }
         except Exception as e:
+            error_msg = str(e)
+            print(f"[ERROR] Session {session_id} failed: {error_msg}")
+            
+            # Session error logged in memory (container concurrency)
+            print(f"❌ Session {session_id} failed: {error_msg}")
+            
             job_status[session_id]["status"] = "error"
-            job_status[session_id]["error"] = str(e)
+            job_status[session_id]["error"] = error_msg
+            
+            # Clean up on error too
+            cleanup_session_files(session_id)
 
     audio_file_content = await audio_file.read() if audio_file is not None else None
     threading.Thread(target=background_job, args=(audio_file_content,), daemon=True).start()
     return JSONResponse({"session_id": session_id, "status": "pending"})
 
 @app.get("/video_status")
-def video_status(session_id: str):
+def video_status(session_id: str = None):
+    """
+    Get video generation status by session_id
+    
+    Args:
+        session_id: Session identifier (query parameter)
+        
+    Returns:
+        Status information for the session
+    """
+    if not session_id:
+        return JSONResponse({"error": "session_id parameter is required"}, status_code=400)
+        
     if session_id not in job_status:
         return JSONResponse({"error": "Invalid session_id"}, status_code=404)
     status = job_status[session_id]["status"]
+    
+    # Get video generation progress if available
+    from video_generator import get_video_generation_status
+    video_progress = get_video_generation_status()
+    
+    response = {
+        "session_id": session_id,
+        "status": status,
+        "video_generation_progress": video_progress
+    }
+    
     if status == "done":
-        return JSONResponse({"status": status, **job_status[session_id]["result"]})
+        response["result"] = job_status[session_id]["result"]
     elif status == "error":
-        return JSONResponse({"status": status, "error": job_status[session_id]["error"]})
-    else:
-        return JSONResponse({"status": status})
+        response["error"] = job_status[session_id]["error"]
+    
+    return JSONResponse(response)
+
+@app.get("/session_result/{session_id}")
+async def get_session_result(session_id: str):
+    """
+    Retrieve session result by session_id from memory (container concurrency)
+    
+    Args:
+        session_id: Session identifier provided by user
+        
+    Returns:
+        Session result with S3 URLs and status
+    """
+    """
+    Retrieve session result by session_id from memory (container concurrency)
+    
+    Args:
+        session_id: Session identifier provided by user
+        
+    Returns:
+        Session result with S3 URLs and status
+    """
+    if session_id not in job_status:
+        return JSONResponse(
+            {"error": "Session not found", "session_id": session_id}, 
+            status_code=404
+        )
+    
+    status_data = job_status[session_id]
+    
+    if status_data["status"] == "error":
+        return JSONResponse({
+            "session_id": session_id,
+            "status": "error",
+            "error_message": status_data.get("error", "Unknown error"),
+            "created_at": status_data.get("created_at")
+        })
+    
+    if status_data["status"] == "done":
+        result = status_data.get("result", {})
+        return JSONResponse({
+            "session_id": session_id,
+            "status": "completed",
+            "video_name": result.get("video_name"),
+            "s3_url": result.get("s3_url"),
+            "heygen_s3_url": result.get("heygen_overlay_video"),
+            "heygen_overlay_video": result.get("heygen_overlay_video"),
+            "video_filename": result.get("video_filename"),
+            "result_data": result
+        })
+    
+    return JSONResponse({
+        "session_id": session_id,
+        "status": status_data["status"],
+        "message": "Session still processing"
+    })
+
+@app.get("/download_video/{session_id}")
+async def download_video(session_id: str):
+    """
+    Download video by session_id
+    
+    Args:
+        session_id: Session identifier provided by user
+        
+    Returns:
+        Video file or redirect to S3 URL
+    """
+    if session_id not in job_status:
+        return JSONResponse(
+            {"error": "Session not found", "session_id": session_id}, 
+            status_code=404
+        )
+    
+    status_data = job_status[session_id]
+    
+    if status_data["status"] != "done":
+        return JSONResponse({
+            "error": "Video not ready",
+            "session_id": session_id,
+            "status": status_data["status"]
+        }, status_code=400)
+    
+    result = status_data.get("result", {})
+    s3_url = result.get("s3_url")
+    
+    if not s3_url:
+        return JSONResponse({
+            "error": "Video URL not found",
+            "session_id": session_id
+        }, status_code=404)
+    
+    return JSONResponse({
+        "session_id": session_id,
+        "download_url": s3_url,
+        "video_name": result.get("video_name"),
+        "heygen_overlay_video": result.get("heygen_overlay_video")
+    })
+
+
 
 # --- Calculate and save heygen_empty_spaces.json ---
 def calculate_and_save_heygen_empty_spaces(slides_json_path, output_path):
@@ -1865,17 +2043,34 @@ def create_session_directories(session_id: str):
     
     return session_uploads, session_transcripts, session_segments
 
-def segment_transcript_variable_duration(sentence_segments):
+def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, audio_duration=None):
     """
     Segment transcript into variable-length segments based on assigned format:
     - Format 4: 5-8 seconds
     - Format 2 or 3: 10-20 seconds (based on word count/complexity)
     Ensures no consecutive formats are the same.
     Returns a list of dicts: {start, end, text, format}
+    
+    Args:
+        sentence_segments: List of transcription segments
+        srt_file_path: Optional path to SRT file to get content for slide generation
+        audio_duration: Optional actual audio duration from words (takes precedence over SRT duration)
     """
     if not sentence_segments:
         return []
-    total_duration = sentence_segments[-1]['end']
+    
+    # Use audio_duration if provided, otherwise fall back to SRT file or transcription
+    if audio_duration is not None:
+        print(f"[DEBUG] Using provided audio duration: {audio_duration:.2f}s")
+        total_duration = audio_duration
+    elif srt_file_path and os.path.exists(srt_file_path):
+        print(f"[DEBUG] Using SRT file for duration: {srt_file_path}")
+        total_duration = get_srt_duration(srt_file_path)
+        print(f"[DEBUG] SRT file duration: {total_duration:.2f}s")
+    else:
+        total_duration = sentence_segments[-1]['end']
+        print(f"[DEBUG] Using transcription duration: {total_duration:.2f}s")
+    
     segments = []
     segment_start = 0
     previous_format = None
@@ -1903,6 +2098,14 @@ def segment_transcript_variable_duration(sentence_segments):
         if best_end is None:
             # If no suitable end found, just use min(segment_start+min_dur, total_duration)
             best_end = min(segment_start + min_dur, total_duration)
+        # If this is the last segment or we're close to the end, force it to end at total_duration
+        if best_end >= total_duration or segment_end >= total_duration or (total_duration - best_end) < min_dur:
+            best_end = total_duration
+        # If for any reason best_end did not advance, break to avoid infinite loop
+        if best_end <= segment_start:
+            best_end = total_duration
+            if best_end == segment_start:
+                break
         # Collect text for this segment
         segment_text = ''
         for s in sentence_segments:
@@ -1921,4 +2124,40 @@ def segment_transcript_variable_duration(sentence_segments):
             previous_format = format_type
         segment_start = best_end
         i += 1
+    # Correction: If due to rounding, the last segment's end is not exactly total_duration, fix it
+    if segments and abs(segments[-1]['end'] - total_duration) > 1e-3:
+        segments[-1]['end'] = total_duration
+    # Debug output: print all segment timings and their sum
+    print("[DEBUG] Slide Segments:")
+    total = 0
+    for idx, seg in enumerate(segments):
+        dur = seg['end'] - seg['start']
+        total += dur
+        print(f"  Segment {idx+1}: {seg['start']:.2f}s - {seg['end']:.2f}s (duration: {dur:.2f}s)")
+    print(f"[DEBUG] Sum of slide durations: {total:.2f}s")
+    print(f"[DEBUG] Total audio duration: {total_duration:.2f}s")
     return segments
+
+def get_srt_duration(srt_file_path):
+    """Get the total duration from an SRT file"""
+    try:
+        with open(srt_file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Find the last timestamp in the SRT file
+        import re
+        timestamp_pattern = r'(\d{2}):(\d{2}):(\d{2}),(\d{3}) --> (\d{2}):(\d{2}):(\d{2}),(\d{3})'
+        matches = re.findall(timestamp_pattern, content)
+        
+        if matches:
+            # Get the end time of the last subtitle
+            last_match = matches[-1]
+            end_h, end_m, end_s, end_ms = map(int, last_match[4:])
+            total_duration = end_h * 3600 + end_m * 60 + end_s + end_ms / 1000
+            return total_duration
+        else:
+            print(f"[WARNING] No timestamps found in SRT file: {srt_file_path}")
+            return 0
+    except Exception as e:
+        print(f"[ERROR] Failed to read SRT file {srt_file_path}: {e}")
+        return 0
