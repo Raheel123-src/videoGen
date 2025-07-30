@@ -67,6 +67,16 @@ def fastapi_app():
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Set CUDA device
     os.environ['NVIDIA_VISIBLE_DEVICES'] = '0'  # Set NVIDIA device
     
+    # Fix PIL ANTIALIAS compatibility issue
+    try:
+        from PIL import Image
+        # Add ANTIALIAS back for compatibility with older MoviePy versions
+        if not hasattr(Image, 'ANTIALIAS'):
+            Image.ANTIALIAS = Image.LANCZOS
+        print("[MODAL DEPLOYMENT] Fixed PIL ANTIALIAS compatibility")
+    except Exception as e:
+        print(f"[MODAL DEPLOYMENT] Warning: Could not fix PIL compatibility: {e}")
+    
     # Add root to Python path
     sys.path.append("/root")
     

@@ -22,6 +22,14 @@ import numpy as np
 import re
 from datetime import datetime
 
+# Fix PIL ANTIALIAS compatibility issue
+try:
+    if not hasattr(Image, 'ANTIALIAS'):
+        Image.ANTIALIAS = Image.LANCZOS
+    print("[PIL] ANTIALIAS compatibility fix applied in video_generator")
+except Exception as e:
+    print(f"[PIL] Warning: Could not apply ANTIALIAS fix in video_generator: {e}")
+
 def detect_available_encoders():
     """Detect available GPU and CPU encoders"""
     try:

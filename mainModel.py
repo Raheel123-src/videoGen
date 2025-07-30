@@ -20,6 +20,14 @@ from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip
 from PIL import Image, ImageDraw, ImageFont
 import numpy as np
 
+# Fix PIL ANTIALIAS compatibility issue
+try:
+    if not hasattr(Image, 'ANTIALIAS'):
+        Image.ANTIALIAS = Image.LANCZOS
+    print("[PIL] ANTIALIAS compatibility fix applied")
+except Exception as e:
+    print(f"[PIL] Warning: Could not apply ANTIALIAS fix: {e}")
+
 from openai import OpenAI
 import difflib
 import concurrent.futures
