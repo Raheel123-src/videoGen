@@ -187,6 +187,38 @@ def calculate_empty_space(slide, title_font, body_font):
         max_width = SLIDE_WIDTH // 2 - 2 * LEFT_MARGIN
         position_info = "EXTREME RIGHT"
     
+    # 🎯 NEW: Check if text content overlaps with avatar area
+    avatar_area_top = empty_space_top
+    avatar_area_bottom = empty_space_top + MIN_AVATAR_SIZE
+    avatar_area_left = x
+    avatar_area_right = x + MIN_AVATAR_SIZE
+    
+    # Check if any text content overlaps with the avatar area
+    text_overlaps_avatar = False
+    
+    # Check title overlap
+    title_bottom = TOP_MARGIN
+    for line in title_lines:
+        title_bottom += title_font.size + 10
+    title_bottom += 120  # Spacing after title
+    
+    if title_bottom > avatar_area_top:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: title overlaps with avatar area (title ends at {title_bottom}px, avatar starts at {avatar_area_top}px)")
+        return None
+    
+    # Check bullets overlap
+    current_y = title_bottom
+    for bullet in bullets:
+        bullet_lines = wrap_text(bullet, body_font, max_text_width, draw)
+        for line in bullet_lines:
+            current_y += body_font.size + 8
+        current_y += 24
+        
+        # If bullets extend into avatar area, skip HeyGen
+        if current_y > avatar_area_top:
+            print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: bullets overlap with avatar area (bullets end at {current_y}px, avatar starts at {avatar_area_top}px)")
+            return None
+    
     # 🎯 ENHANCED: Calculate optimal avatar size within our range
     avatar_size = min(max_width, empty_space_height - AVATAR_SAFETY_MARGIN, MAX_AVATAR_SIZE)
     avatar_size = max(avatar_size, MIN_AVATAR_SIZE)  # Ensure minimum size
