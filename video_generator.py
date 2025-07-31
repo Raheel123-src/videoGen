@@ -482,37 +482,29 @@ def get_video_generation_status():
     }
 
 class VideoGenerator:
-    def __init__(self, segments_folder, transcripts_folder, font_folder):
+    def __init__(self, segments_folder, transcripts_folder, font_folder, session_id=None):
         self.segments_folder = segments_folder
         self.transcripts_folder = transcripts_folder
         self.font_folder = font_folder
-        self.font_path = os.path.join(font_folder, "CircularStd-Book.ttf")
-        self.bold_font_path = os.path.join("circular-std-font-family", "CircularStd-Bold.ttf")
+        self.session_id = session_id
         
-        # Video settings - original 1920x1080 resolution
-        self.width = 1920  # Original resolution
-        self.height = 1080  # Original resolution
-        self.fps = 30  # Original frame rate
+        # Load fonts
+        self.title_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 72)
+        self.body_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 36)
+        self.subtitle_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 48)
+        self.subtitle_overlay_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 42)
+        
+        # Video dimensions and settings
+        self.width = 1920
+        self.height = 1080
+        self.fps = 30
         self.background_color = (255, 255, 255)  # White
-        self.text_color = (0, 0, 0)  # Black
         
-        # Font sizes - original sizes for 1920x1080
-        self.title_size = 72
-        self.subtitle_size = 48
-        self.body_size = 36
-        self.subtitle_font_size = 42
+        # Colors
+        self.text_color = (0, 0, 0)
         
-        # Pre-load fonts for speed
-        try:
-            self.title_font = ImageFont.truetype(self.bold_font_path, self.title_size)
-            self.subtitle_font = ImageFont.truetype(self.font_path, self.subtitle_size)
-            self.body_font = ImageFont.truetype(self.font_path, self.body_size)
-            self.subtitle_overlay_font = ImageFont.truetype(self.font_path, self.subtitle_font_size)
-        except:
-            self.title_font = ImageFont.load_default()
-            self.subtitle_font = ImageFont.load_default()
-            self.body_font = ImageFont.load_default()
-            self.subtitle_overlay_font = ImageFont.load_default()
+        # Load word segments for subtitle generation
+        self.word_segments = []
     
     def load_segments_data(self, segments_file):
         """Load segments data from JSON file"""
@@ -665,11 +657,25 @@ class VideoGenerator:
         # Load generated Ideogram image for image slots (for formats 2, 3, 4)
         slide_number = slide_dict.get('slide_number', 1)
         format_type = slide_dict.get('format', 1)
-        ideogram_img_path = os.path.join('generated_images_ideogram', f'slide_{slide_number}_format_{format_type}.png')
+        
+        # Look for images in session-specific folder first, then fallback to global folder
+        ideogram_img_path = None
+        if self.session_id:
+            # Try session-specific folder first
+            session_img_path = os.path.join('generated_images_ideogram', self.session_id, f'slide_{slide_number}_format_{format_type}.png')
+            if os.path.exists(session_img_path):
+                ideogram_img_path = session_img_path
+                print_flush(f"[IMAGE] Using session-specific Ideogram image: {ideogram_img_path}")
+        
+        # Fallback to global folder if session-specific image not found
+        if ideogram_img_path is None:
+            ideogram_img_path = os.path.join('generated_images_ideogram', f'slide_{slide_number}_format_{format_type}.png')
+            if os.path.exists(ideogram_img_path):
+                print_flush(f"[IMAGE] Using global Ideogram image: {ideogram_img_path}")
+        
         sample_img = None
-        if os.path.exists(ideogram_img_path):
+        if ideogram_img_path and os.path.exists(ideogram_img_path):
             sample_img = Image.open(ideogram_img_path)
-            print_flush(f"[IMAGE] Using Ideogram image: {ideogram_img_path}")
         else:
             # Fallback to sample image if Ideogram image doesn't exist
             sample_img_path = os.path.join('uploads', 'sample_image.jpg')

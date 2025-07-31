@@ -62,7 +62,7 @@ def generate_image_ideogram_optimized(prompt, aspect_ratio, slide_number):
         print(f"❌ Error generating image for slide {slide_number}: {e}")
         return None, slide_number
 
-def save_image_optimized(image_data, slide_info):
+def save_image_optimized(image_data, slide_info, session_id=None):
     """Save image bytes to file with progress tracking"""
     image_bytes, slide_number = image_data
     if image_bytes is None:
@@ -71,7 +71,15 @@ def save_image_optimized(image_data, slide_info):
     try:
         # Get format type from slide info
         format_type = slide_info.get('format', 2)
-        filename = f"generated_images_ideogram/slide_{slide_number}_format_{format_type}.png"
+        
+        # Create session-specific folder structure
+        if session_id:
+            session_images_dir = os.path.join('generated_images_ideogram', session_id)
+            os.makedirs(session_images_dir, exist_ok=True)
+            filename = os.path.join(session_images_dir, f'slide_{slide_number}_format_{format_type}.png')
+        else:
+            # Fallback to original behavior for backward compatibility
+            filename = f"generated_images_ideogram/slide_{slide_number}_format_{format_type}.png"
         
         with open(filename, 'wb') as f:
             f.write(image_bytes)
@@ -89,7 +97,7 @@ def save_image_optimized(image_data, slide_info):
         print(f"❌ Error saving image for slide {slide_number}: {e}")
         return False, slide_number
 
-def process_slide_parallel(slide):
+def process_slide_parallel(slide, session_id=None):
     """Process a single slide with image generation"""
     slide_number = slide['slide_number']
     format_type = slide['format']
@@ -113,8 +121,8 @@ def process_slide_parallel(slide):
     image_data = generate_image_ideogram_optimized(image_prompt, aspect_ratio, slide_number)
     
     if image_data[0]:
-        # Save image
-        success, _ = save_image_optimized(image_data, slide)
+        # Save image with session_id
+        success, _ = save_image_optimized(image_data, slide, session_id)
         if success:
             print(f"✅ Slide {slide_number} completed")
         else:
@@ -124,7 +132,7 @@ def process_slide_parallel(slide):
         print(f"❌ Slide {slide_number} failed")
         return False
 
-def main():
+def main(session_id=None):
     # Check if API key is available
     if not IDEOGRAM_API_KEY:
         print("❌ Error: IDEOGRAM_API_KEY not found in .env file")
@@ -150,6 +158,8 @@ def main():
     
     print(f"🚀 Starting optimized image generation for {total_images} slides")
     print(f"⚡ Using parallel processing for faster generation")
+    if session_id:
+        print(f"📁 Session ID: {session_id}")
     print("=" * 60)
     
     # Use ThreadPoolExecutor for parallel processing
@@ -157,9 +167,9 @@ def main():
     max_workers = min(4, total_images)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
+        # Submit all tasks with session_id
         future_to_slide = {
-            executor.submit(process_slide_parallel, slide): slide 
+            executor.submit(process_slide_parallel, slide, session_id): slide 
             for slide in slides_with_images
         }
         
@@ -176,8 +186,10 @@ def main():
                 print(f"❌ Exception for slide {slide['slide_number']}: {e}")
     
     print(f"\n🎉 Image generation complete!")
-    print(f"📊 Generated {completed_images}/{total_images} images")
-    print(f"📁 Check the 'generated_images_ideogram' folder for all generated images.")
+    if session_id:
+        print(f"📁 Check the 'generated_images_ideogram/{session_id}' folder for all generated images.")
+    else:
+        print(f"📁 Check the 'generated_images_ideogram' folder for all generated images.")
 
 if __name__ == "__main__":
     main() 

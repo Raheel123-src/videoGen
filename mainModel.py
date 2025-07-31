@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from dotenv import load_dotenv
 from pydub import AudioSegment
 import json
@@ -39,6 +40,21 @@ from bgm_processor import BGMProcessor
 
 # Supabase integration removed - using container concurrency for session management
 
+# Pydantic model for JSON requests
+class VideoGenerationRequest(BaseModel):
+    video_name: str
+    script: Optional[str] = None
+    audio_url: Optional[str] = None
+    speed: Optional[float] = None
+    voice_id: Optional[str] = None
+    stability: Optional[float] = None
+    similarity_boost: Optional[float] = None
+    show_subtitles: str = "true"
+    target_audience: Optional[str] = None
+    heygen_avatar_id: Optional[str] = None
+    bgm_volume: Optional[int] = 50
+    bgm_crossfade: Optional[int] = 2000
+
 # Load environment variables
 load_dotenv()
 
@@ -58,12 +74,13 @@ def create_session_directories(session_id: str):
     session_uploads = os.path.join(UPLOAD_FOLDER, session_id)
     session_transcripts = os.path.join(TRANSCRIPTS_FOLDER, session_id)
     session_segments = os.path.join(SEGMENTS_FOLDER, session_id)
+    session_images = os.path.join('generated_images_ideogram', session_id)
     
-    for folder in [session_uploads, session_transcripts, session_segments]:
+    for folder in [session_uploads, session_transcripts, session_segments, session_images]:
         if not os.path.exists(folder):
             os.makedirs(folder)
     
-    return session_uploads, session_transcripts, session_segments
+    return session_uploads, session_transcripts, session_segments, session_images
 
 def cleanup_session_files(session_id: str):
     """Clean up temporary files for a session"""
@@ -71,8 +88,9 @@ def cleanup_session_files(session_id: str):
         session_uploads = os.path.join(UPLOAD_FOLDER, session_id)
         session_transcripts = os.path.join(TRANSCRIPTS_FOLDER, session_id)
         session_segments = os.path.join(SEGMENTS_FOLDER, session_id)
+        session_images = os.path.join('generated_images_ideogram', session_id)
         
-        for folder in [session_uploads, session_transcripts, session_segments]:
+        for folder in [session_uploads, session_transcripts, session_segments, session_images]:
             if os.path.exists(folder):
                 import shutil
                 shutil.rmtree(folder)
@@ -1041,7 +1059,7 @@ def generate_image_ideogram_optimized(prompt, aspect_ratio, slide_number):
         print(f"❌ Error generating image for slide {slide_number}: {e}")
         return None, slide_number
 
-def save_image_optimized(image_data, slide_info):
+def save_image_optimized(image_data, slide_info, session_id=None):
     """Save image bytes to file with progress tracking"""
     image_bytes, slide_number = image_data
     if image_bytes is None:
@@ -1050,7 +1068,15 @@ def save_image_optimized(image_data, slide_info):
     try:
         # Get format type from slide info
         format_type = slide_info.get('format', 2)
-        filename = f"generated_images_ideogram/slide_{slide_number}_format_{format_type}.png"
+        
+        # Create session-specific folder structure
+        if session_id:
+            session_images_dir = os.path.join('generated_images_ideogram', session_id)
+            os.makedirs(session_images_dir, exist_ok=True)
+            filename = os.path.join(session_images_dir, f'slide_{slide_number}_format_{format_type}.png')
+        else:
+            # Fallback to original behavior for backward compatibility
+            filename = f"generated_images_ideogram/slide_{slide_number}_format_{format_type}.png"
         
         with open(filename, 'wb') as f:
             f.write(image_bytes)
@@ -1062,7 +1088,7 @@ def save_image_optimized(image_data, slide_info):
         print(f"❌ Error saving image for slide {slide_number}: {e}")
         return False, slide_number
 
-def process_slide_parallel(slide):
+def process_slide_parallel(slide, session_id=None):
     """Process a single slide with image generation"""
     slide_number = slide['slide_number']
     format_type = slide['format']
@@ -1086,8 +1112,8 @@ def process_slide_parallel(slide):
     image_data = generate_image_ideogram_optimized(image_prompt, aspect_ratio, slide_number)
     
     if image_data[0]:
-        # Save image
-        success, _ = save_image_optimized(image_data, slide)
+        # Save image with session_id
+        success, _ = save_image_optimized(image_data, slide, session_id)
         if success:
             print(f"✅ Slide {slide_number} completed")
         else:
@@ -1097,7 +1123,7 @@ def process_slide_parallel(slide):
         print(f"❌ Slide {slide_number} failed")
         return False
 
-def generate_images_from_slides(slides_json_path='segments/slides.json'):
+def generate_images_from_slides(slides_json_path='segments/slides.json', session_id=None):
     """Generate images for all slides that need them"""
     # Check if API key is available
     IDEOGRAM_API_KEY = os.getenv('IDEOGRAM_API_KEY')
@@ -1124,6 +1150,8 @@ def generate_images_from_slides(slides_json_path='segments/slides.json'):
     
     print(f"🚀 Starting optimized image generation for {total_images} slides")
     print(f"⚡ Using parallel processing for faster generation")
+    if session_id:
+        print(f"📁 Session ID: {session_id}")
     print("=" * 60)
     
     # Use ThreadPoolExecutor for parallel processing
@@ -1131,9 +1159,9 @@ def generate_images_from_slides(slides_json_path='segments/slides.json'):
     max_workers = min(10, total_images)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
+        # Submit all tasks with session_id
         future_to_slide = {
-            executor.submit(process_slide_parallel, slide): slide 
+            executor.submit(process_slide_parallel, slide, session_id): slide 
             for slide in slides_with_images
         }
         
@@ -1150,7 +1178,10 @@ def generate_images_from_slides(slides_json_path='segments/slides.json'):
                 print(f"❌ Exception for slide {slide['slide_number']}: {e}")
     
     print(f"\n🎉 Image generation complete!")
-    print(f"📁 Check the 'generated_images_ideogram' folder for all generated images.")
+    if session_id:
+        print(f"📁 Check the 'generated_images_ideogram/{session_id}' folder for all generated images.")
+    else:
+        print(f"📁 Check the 'generated_images_ideogram' folder for all generated images.")
     return True
 
 # Highlight functions (integrated from gpt_highlight_bullets.py)
@@ -1321,6 +1352,266 @@ app.add_middleware(
 # Simple job status tracking (in-memory dict for now, can be replaced with persistent store)
 job_status = {}
 
+@app.post("/process_and_generate_video_json")
+async def process_and_generate_video_json(request: VideoGenerationRequest):
+    """
+    Process and generate video using JSON request body instead of form data.
+    This endpoint accepts JSON and is suitable for API integrations.
+    """
+    session_id = f"{request.video_name}_{uuid.uuid4().hex[:8]}"
+    job_status[session_id] = {"status": "pending", "result": None, "error": None}
+    
+    def background_job():
+        try:
+            job_status[session_id]["status"] = "processing"
+            session_uploads, session_transcripts, session_segments, session_images = create_session_directories(session_id)
+            
+            # Validation - must have at least one input source
+            if not request.audio_url and not request.script:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Please provide either an audio_url or a script."
+                return
+            
+            if not request.video_name:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Video name is required"
+                return
+            
+            video_name_clean = re.sub(r'[^a-zA-Z0-9_]', '_', request.video_name)
+            if not video_name_clean:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Invalid video name"
+                return
+            
+            print(f"[JSON API] Starting combined process for video: {video_name_clean} (session: {session_id})")
+            
+            # Process audio input
+            if request.audio_url:
+                filename, filepath = download_audio_file(request.audio_url)
+                if not filename:
+                    filename = f"audio_{random.randint(1000,9999)}.mp3"
+                if not filepath:
+                    job_status[session_id]["status"] = "error"
+                    job_status[session_id]["error"] = "Failed to download audio file."
+                    return
+                # Move downloaded file to session directory
+                session_filepath = os.path.join(session_uploads, filename)
+                import shutil
+                shutil.move(filepath, session_filepath)
+                filepath = session_filepath
+                print(f"[JSON API] Downloaded file: {filepath}")
+            elif request.script:
+                use_speed = request.speed if request.speed is not None else 1.0
+                use_voice_id = request.voice_id if request.voice_id else ELEVENLABS_DEFAULT_VOICE_ID
+                use_stability = request.stability if request.stability is not None else 0.35
+                use_similarity_boost = request.similarity_boost if request.similarity_boost is not None else 0.40
+                filename, filepath = generate_audio_from_script(request.script, use_speed, use_voice_id, use_stability, use_similarity_boost)
+                # Move generated file to session directory
+                session_filepath = os.path.join(session_uploads, filename)
+                import shutil
+                shutil.move(filepath, session_filepath)
+                filepath = session_filepath
+                print(f"[JSON API] Generated audio from script: {filepath}")
+            else:
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "No valid audio input provided."
+                return
+            
+            if not os.path.exists(filepath):
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = "Audio file not found after upload/generation."
+                return
+            
+            print(f"[JSON API] Transcribing audio...")
+            sentence_segments, word_segments, audio_duration = transcribe_audio(filepath)
+            base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
+            srt_filename = f"{base_filename}_sentences.srt"
+            srt_filepath = os.path.join(session_transcripts, srt_filename)
+            create_srt_file(sentence_segments, srt_filepath)
+            word_srt_filename = f"{base_filename}_words.srt"
+            word_srt_filepath = os.path.join(session_transcripts, word_srt_filename)
+            create_word_srt_file(word_segments, word_srt_filepath)
+            
+            # If a script is provided, always run SRT correction after transcription
+            if request.script:
+                print("[JSON API] Sending SRTs and script to GPT for correction...")
+                with open(srt_filepath, 'r', encoding='utf-8') as f:
+                    srt_sentence_content = f.read()
+                with open(word_srt_filepath, 'r', encoding='utf-8') as f:
+                    srt_word_content = f.read()
+                try:
+                    corrected_sentence_srt, corrected_word_srt = gpt_refactor_transcripts_srt(request.script, srt_sentence_content, srt_word_content)
+                except Exception as e:
+                    print(f"[ERROR] GPT SRT correction failed: {e}")
+                    job_status[session_id]["status"] = "error"
+                    job_status[session_id]["error"] = f"GPT SRT correction failed: {e}"
+                    return
+                # Overwrite the SRT files with the corrected SRTs
+                with open(srt_filepath, 'w', encoding='utf-8') as f:
+                    f.write(corrected_sentence_srt)
+                with open(word_srt_filepath, 'w', encoding='utf-8') as f:
+                    f.write(corrected_word_srt)
+            
+            # --- Ensure slides.json is generated ---
+            slides_json_path = os.path.join(session_segments, 'slides.json')
+            # If SRT correction was run, create slides and segments from corrected SRT
+            if request.script:
+                print("[JSON API] Creating slides and segments from GPT-corrected SRT content...")
+                corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
+                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience)
+            else:
+                # Use original transcription for slides and segments
+                print("[JSON API] Creating slides and segments from original transcription...")
+                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience)
+            
+            # Create segments.json for video generation (always use the segments from above)
+            segments_filename = f"{base_filename}_segments.json"
+            segments_filepath = os.path.join(session_segments, segments_filename)
+            segments_data = {
+                "segments": [
+                    {
+                        "segment_id": i + 1,
+                        "start_time": seg["start"] if isinstance(seg, dict) and "start" in seg else 0,
+                        "end_time": seg["end"] if isinstance(seg, dict) and "end" in seg else 0,
+                        "duration": (seg["end"] - seg["start"]) if isinstance(seg, dict) and "end" in seg and "start" in seg else 0,
+                        "text": seg["text"] if isinstance(seg, dict) and "text" in seg else "",
+                        "format": seg.get("format", None)
+                    } for i, seg in enumerate(audio_segments) if isinstance(seg, dict)
+                ]
+            }
+            with open(segments_filepath, 'w', encoding='utf-8') as f:
+                json.dump(segments_data, f, indent=2, ensure_ascii=False)
+            print(f"[JSON API] Audio processing completed")
+            
+            print(f"[JSON API] Generating images with optimized parallel processing...")
+            try:
+                success = generate_images_from_slides(slides_json_path, session_id)
+                if success:
+                    print(f"[JSON API] Image generation completed with optimization")
+                else:
+                    print(f"[JSON API] Image generation failed")
+            except Exception as e:
+                print(f"[JSON API] Image generation failed: {e}")
+            
+            print(f"[JSON API] Adding highlights...")
+            try:
+                success = add_highlights_to_slides(slides_json_path)
+                if success:
+                    print(f"[JSON API] Highlights added")
+                else:
+                    print(f"[JSON API] Highlight addition failed")
+            except Exception as e:
+                print(f"[JSON API] Highlight script failed: {e}")
+            
+            # --- BGM Processing ---
+            print(f"[JSON API] Starting BGM processing...")
+            try:
+                # Process BGM directly (since we're already in a background thread)
+                bgm_processed_audio_path = process_bgm_audio(
+                    original_audio_path=filepath,
+                    transcription_file=srt_filepath,
+                    segments_file=segments_filepath,
+                    bgm_volume=request.bgm_volume,
+                    crossfade_duration=request.bgm_crossfade
+                )
+                print(f"[JSON API] BGM processing completed: {bgm_processed_audio_path}")
+            except Exception as e:
+                print(f"[JSON API] BGM processing failed: {e}")
+                bgm_processed_audio_path = filepath  # Use original audio if BGM fails
+            
+            # --- Video Generation ---
+            print(f"[JSON API] Starting video generation...")
+            try:
+                video_gen = VideoGenerator(
+                    segments_folder=session_segments,
+                    transcripts_folder=session_transcripts,
+                    font_folder='circular-std-font-family',
+                    session_id=session_id
+                )
+                
+                output_filename = f"{video_name_clean}.mp4"
+                output_filepath = os.path.join(session_uploads, output_filename)
+                
+                # Generate video with BGM audio
+                video_gen.generate_video(
+                    segments_file=segments_filepath,
+                    word_srt_file=word_srt_filepath,
+                    audio_file=bgm_processed_audio_path,
+                    output_file=output_filepath,
+                    show_subtitles=request.show_subtitles.lower() == "true"
+                )
+                
+                print(f"[JSON API] Video generation completed: {output_filepath}")
+                
+                # --- HeyGen Avatar Overlay (if requested) ---
+                heygen_overlay_video = None
+                if request.heygen_avatar_id:
+                    print(f"[JSON API] Starting HeyGen avatar overlay...")
+                    try:
+                        heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
+                        calculate_and_save_heygen_empty_spaces(slides_json_path, heygen_empty_spaces_path)
+                        
+                        heygen_overlay_video = overlay_heygen_avatars(
+                            heygen_empty_spaces_path=heygen_empty_spaces_path,
+                            segments_filepath=segments_filepath,
+                            filepath=output_filepath,
+                            session_uploads=session_uploads,
+                            session_segments=session_segments,
+                            session_id=session_id,
+                            heygen_avatar_id=request.heygen_avatar_id
+                        )
+                        print(f"[JSON API] HeyGen avatar overlay completed: {heygen_overlay_video}")
+                    except Exception as e:
+                        print(f"[JSON API] HeyGen avatar overlay failed: {e}")
+                
+                # --- Upload to S3 ---
+                print(f"[JSON API] Uploading to S3...")
+                try:
+                    s3_url = upload_video_to_s3(output_filepath, output_filename)
+                    heygen_s3_url = None
+                    if heygen_overlay_video:
+                        heygen_s3_url = upload_video_to_s3(heygen_overlay_video, f"heygen_{output_filename}")
+                    
+                    result = {
+                        "video_name": video_name_clean,
+                        "s3_url": s3_url,
+                        "heygen_overlay_video": heygen_s3_url,
+                        "video_filename": output_filename,
+                        "session_id": session_id
+                    }
+                    
+                    job_status[session_id]["status"] = "done"
+                    job_status[session_id]["result"] = result
+                    print(f"[JSON API] Process completed successfully for session: {session_id}")
+                    
+                except Exception as e:
+                    error_msg = f"S3 upload failed: {e}"
+                    print(f"[JSON API] {error_msg}")
+                    job_status[session_id]["status"] = "error"
+                    job_status[session_id]["error"] = error_msg
+                    
+            except Exception as e:
+                error_msg = f"Video generation failed: {e}"
+                print(f"[JSON API] {error_msg}")
+                job_status[session_id]["status"] = "error"
+                job_status[session_id]["error"] = error_msg
+                
+        except Exception as e:
+            error_msg = f"Unexpected error: {e}"
+            print(f"[JSON API] {error_msg}")
+            job_status[session_id]["status"] = "error"
+            job_status[session_id]["error"] = error_msg
+            
+            # Clean up on error too
+            cleanup_session_files(session_id)
+    
+    # Start background job
+    threading.Thread(target=background_job, daemon=True).start()
+    return JSONResponse({"session_id": session_id, "status": "pending"})
+
+# Original form-data endpoint (for file uploads and web forms)
 @app.post("/process_and_generate_video")
 async def process_and_generate_video(
     audio_file: Optional[UploadFile] = File(None),
@@ -1344,7 +1635,7 @@ async def process_and_generate_video(
             job_status[session_id]["status"] = "processing"
             # Generate unique session ID for this request
             # session_id is already set
-            session_uploads, session_transcripts, session_segments = create_session_directories(session_id)
+            session_uploads, session_transcripts, session_segments, session_images = create_session_directories(session_id)
             if not audio_file and not audio_url and not script:
                 job_status[session_id]["status"] = "error"
                 job_status[session_id]["error"] = "Please provide either an audio file, audio URL, or a script."
@@ -1459,7 +1750,7 @@ async def process_and_generate_video(
             print(f"[COMBINED API] Audio processing completed")
             print(f"[COMBINED API] Generating images with optimized parallel processing...")
             try:
-                success = generate_images_from_slides(slides_json_path)
+                success = generate_images_from_slides(slides_json_path, session_id)
                 if success:
                     print(f"[COMBINED API] Image generation completed with optimization")
                 else:
@@ -1504,7 +1795,8 @@ async def process_and_generate_video(
             video_gen = VideoGenerator(
                 segments_folder=session_segments,
                 transcripts_folder=session_transcripts,
-                font_folder='circular-std-font-family'
+                font_folder='circular-std-font-family',
+                session_id=session_id
             )
             
             output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
@@ -2095,12 +2387,13 @@ def create_session_directories(session_id: str):
     session_uploads = os.path.join(UPLOAD_FOLDER, session_id)
     session_transcripts = os.path.join(TRANSCRIPTS_FOLDER, session_id)
     session_segments = os.path.join(SEGMENTS_FOLDER, session_id)
+    session_images = os.path.join('generated_images_ideogram', session_id)
     
-    for folder in [session_uploads, session_transcripts, session_segments]:
+    for folder in [session_uploads, session_transcripts, session_segments, session_images]:
         if not os.path.exists(folder):
             os.makedirs(folder)
     
-    return session_uploads, session_transcripts, session_segments
+    return session_uploads, session_transcripts, session_segments, session_images
 
 def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, audio_duration=None):
     """
