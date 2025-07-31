@@ -295,6 +295,14 @@ Title: {segment_title or f"Slide {segment_index+1}"}
         slide_json = try_parse_json(fixed_json)
         if slide_json is None:
             raise Exception(f"Failed to parse/fix JSON for segment {segment_index}. Raw: {raw_json}")
+    
+    # 🎯 NEW RULE: If format is 2 or 3 but no bullet points, change to format 4
+    if slide_json.get('format') in [2, 3]:
+        bullets = slide_json.get('bullets', [])
+        if not bullets or len(bullets) < 2:
+            print(f"[FORMAT FIX] Slide {segment_index + 1}: Format {slide_json.get('format')} has insufficient bullets ({len(bullets)}), changing to format 4")
+            slide_json['format'] = 4
+    
     return slide_json
 
 import re

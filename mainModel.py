@@ -99,9 +99,9 @@ TOP_MARGIN = 120
 BULLET_SPACING = 44
 SUBTITLE_HEIGHT = 60
 # --- HeyGen Avatar Configuration ---
-MIN_AVATAR_SIZE = 185  # Minimum avatar size in pixels
+MIN_AVATAR_SIZE = 175  # Minimum avatar size in pixels
 MAX_AVATAR_SIZE = 250  # Maximum avatar size in pixels  
-AVATAR_SAFETY_MARGIN = 20  # Safety margin from text
+AVATAR_SAFETY_MARGIN = 15  # Safety margin from text (reduced to allow 740px position)
 BOTTOM_MARGIN = 80
 
 # --- HeyGen Overlay Constants ---
@@ -166,13 +166,17 @@ def calculate_empty_space(slide, title_font, body_font):
     subtitle_y = SLIDE_HEIGHT - BOTTOM_MARGIN - SUBTITLE_HEIGHT
     
     # 🎯 FIXED: Always start at the bottom, not where bullets end
-    empty_space_top = subtitle_y - MIN_AVATAR_SIZE - AVATAR_SAFETY_MARGIN
+    # 🎯 MODIFIED: Start avatar at 740px as requested by user
+    empty_space_top = 740  # Fixed position at 740px
     empty_space_bottom = subtitle_y
     empty_space_height = max(0, empty_space_bottom - empty_space_top)
     
+    # 🎯 MODIFIED: Recalculate available height with fixed position
+    available_height = empty_space_bottom - empty_space_top
+    
     # 🎯 ENHANCED: Check if available height is sufficient for minimum avatar size
-    if empty_space_height < MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN:
-        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: insufficient height ({empty_space_height}px < {MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN}px), skipping overlay")
+    if available_height < MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN:
+        print(f"[HEYGEN SKIP] Slide {slide.get('slide_number')}: insufficient height ({available_height}px < {MIN_AVATAR_SIZE + AVATAR_SAFETY_MARGIN}px), skipping overlay")
         return None
     
     # 🎯 FIXED: Correct positioning logic for extreme left/right
@@ -220,7 +224,7 @@ def calculate_empty_space(slide, title_font, body_font):
             return None
     
     # 🎯 ENHANCED: Calculate optimal avatar size within our range
-    avatar_size = min(max_width, empty_space_height - AVATAR_SAFETY_MARGIN, MAX_AVATAR_SIZE)
+    avatar_size = min(max_width, available_height - AVATAR_SAFETY_MARGIN, MAX_AVATAR_SIZE)
     avatar_size = max(avatar_size, MIN_AVATAR_SIZE)  # Ensure minimum size
     
     # 🎯 ENHANCED: Final size validation with detailed debug
@@ -238,7 +242,7 @@ def calculate_empty_space(slide, title_font, body_font):
     # 🎯 ENHANCED: Detailed debug information
     print(f"[HEYGEN CALC] Slide {slide.get('slide_number')}: format={format_type}, position={position_info}")
     print(f"[HEYGEN CALC] Avatar: size={avatar_size}px, x={x}, y={empty_space_top}")
-    print(f"[HEYGEN CALC] Available: height={empty_space_height}px, max_width={max_width}px")
+    print(f"[HEYGEN CALC] Available: height={available_height}px, max_width={max_width}px")
     
     return {
         'slide_number': slide.get('slide_number'),
@@ -765,6 +769,14 @@ Create an image prompt that shows exactly what this slide is discussing, with ap
         slide_json = try_parse_json(fixed_json)
         if slide_json is None:
             raise Exception(f"Failed to parse/fix JSON for segment {segment_index}. Raw: {raw_json}")
+    
+    # 🎯 NEW RULE: If format is 2 or 3 but no bullet points, change to format 4
+    if slide_json.get('format') in [2, 3]:
+        bullets = slide_json.get('bullets', [])
+        if not bullets or len(bullets) < 2:
+            print(f"[FORMAT FIX] Slide {segment_index + 1}: Format {slide_json.get('format')} has insufficient bullets ({len(bullets)}), changing to format 4")
+            slide_json['format'] = 4
+    
     return slide_json
 
 # Function to create slides.json from segments
@@ -786,6 +798,13 @@ def create_slides_json_from_segments(segments, slides_json_path, target_audience
         # Overwrite the format in slide_json to match the pre-assigned format
         if format_type is not None:
             slide_json['format'] = format_type
+            # 🎯 NEW RULE: Check if format 2/3 has insufficient bullets and change to format 4
+            if format_type in [2, 3]:
+                bullets = slide_json.get('bullets', [])
+                if not bullets or len(bullets) < 2:
+                    print(f"[FORMAT FIX] Slide {i + 1}: Pre-assigned format {format_type} has insufficient bullets ({len(bullets)}), changing to format 4")
+                    slide_json['format'] = 4
+                    format_type = 4  # Update the format for next iteration
         previous_format = format_type
         slides.append(slide_json)
     print(f"[DEBUG] Created {len(slides)} slides from segments")
