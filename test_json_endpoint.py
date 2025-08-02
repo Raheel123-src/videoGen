@@ -24,7 +24,7 @@ def test_json_endpoint():
         "similarity_boost": None,
         "show_subtitles": "true",
         "target_audience": None,
-        "heygen_avatar_id": None,
+        "has_heygen": False,
         "bgm_volume": 50,
         "bgm_crossfade": 2000
     }
@@ -72,7 +72,7 @@ def test_json_endpoint_with_script():
         "similarity_boost": 0.40,
         "show_subtitles": "true",
         "target_audience": "Professional",
-        "heygen_avatar_id": None,
+        "has_heygen": False,
         "bgm_volume": 50,
         "bgm_crossfade": 2000
     }

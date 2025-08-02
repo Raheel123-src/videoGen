@@ -51,7 +51,7 @@ class VideoGenerationRequest(BaseModel):
     similarity_boost: Optional[float] = None
     show_subtitles: str = "true"
     target_audience: Optional[str] = None
-    heygen_avatar_id: Optional[str] = None
+    has_heygen: Optional[bool] = False
     bgm_volume: Optional[int] = 50
     bgm_crossfade: Optional[int] = 2000
 
@@ -1547,7 +1547,7 @@ async def process_and_generate_video_json(request: VideoGenerationRequest):
                 
                 # --- HeyGen Avatar Overlay (if requested) ---
                 heygen_overlay_video = None
-                if request.heygen_avatar_id:
+                if request.has_heygen:
                     print(f"[JSON API] Starting HeyGen avatar overlay...")
                     try:
                         heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
@@ -1560,7 +1560,7 @@ async def process_and_generate_video_json(request: VideoGenerationRequest):
                             session_uploads=session_uploads,
                             session_segments=session_segments,
                             session_id=session_id,
-                            heygen_avatar_id=request.heygen_avatar_id
+                            has_heygen=request.has_heygen
                         )
                         print(f"[JSON API] HeyGen avatar overlay completed: {heygen_overlay_video}")
                     except Exception as e:
@@ -1624,7 +1624,7 @@ async def process_and_generate_video(
     video_name: str = Form(...),
     show_subtitles: str = Form("true"),
     target_audience: Optional[str] = Form(None),
-    heygen_avatar_id: Optional[str] = Form(None),
+    has_heygen: Optional[bool] = Form(False),
     bgm_volume: Optional[int] = Form(50),  # BGM volume (1-100)
     bgm_crossfade: Optional[int] = Form(2000)  # Crossfade duration in milliseconds
 ):
@@ -1834,19 +1834,28 @@ async def process_and_generate_video(
                 traceback.print_exc()
                 raise
             
-            # --- Calculate and save heygen_empty_spaces.json ---
-            heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
-            calculate_and_save_heygen_empty_spaces(slides_json_path, heygen_empty_spaces_path)
-            # --- Overlay HeyGen avatar videos in empty spaces ---
-            heygen_overlay_result = overlay_heygen_avatars(
-                heygen_empty_spaces_path=heygen_empty_spaces_path,
-                segments_filepath=segments_filepath,
-                filepath=video_audio_path,  # Use processed audio for HeyGen
-                session_uploads=session_uploads,
-                session_segments=session_segments,
-                session_id=session_id,
-                heygen_avatar_id=heygen_avatar_id  # <-- pass avatar id
-            )
+            # --- HeyGen Avatar Overlay (if requested) ---
+            heygen_overlay_result = None
+            if has_heygen:
+                print(f"[FORM API] Starting HeyGen avatar overlay...")
+                try:
+                    heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
+                    calculate_and_save_heygen_empty_spaces(slides_json_path, heygen_empty_spaces_path)
+                    # --- Overlay HeyGen avatar videos in empty spaces ---
+                    heygen_overlay_result = overlay_heygen_avatars(
+                        heygen_empty_spaces_path=heygen_empty_spaces_path,
+                        segments_filepath=segments_filepath,
+                        filepath=video_audio_path,  # Use processed audio for HeyGen
+                        session_uploads=session_uploads,
+                        session_segments=session_segments,
+                        session_id=session_id,
+                        has_heygen=has_heygen
+                    )
+                    print(f"[FORM API] HeyGen avatar overlay completed: {heygen_overlay_result}")
+                except Exception as e:
+                    print(f"[FORM API] HeyGen avatar overlay failed: {e}")
+            else:
+                print(f"[FORM API] HeyGen disabled (has_heygen=false), skipping overlay")
             
             # --- Composite HeyGen overlays into the base video ---
             heygen_composited_video_path = os.path.join(session_uploads, f"{video_name_clean}_with_heygen.mp4")
@@ -2078,7 +2087,7 @@ def overlay_heygen_avatars(
     session_uploads,
     session_segments,
     session_id,
-    heygen_avatar_id=None  # <-- accept avatar id
+    has_heygen=False  # <-- accept boolean flag
 ):
     import concurrent.futures
     overlay_filename = None
@@ -2089,12 +2098,16 @@ def overlay_heygen_avatars(
         with open(s3_links_path, 'w') as f:
             f.write('')
         heygen_api_key = os.getenv('HEYGEN_API_KEY')
-        heygen_avatar_id = heygen_avatar_id or 'Jocelyn_sitting_office_side'
+        # Use default avatar ID when has_heygen is True
+        heygen_avatar_id = 'Jocelyn_sitting_office_side' if has_heygen else None
         audio_file_path = filepath
         import json as pyjson
         with open(heygen_empty_spaces_path, 'r', encoding='utf-8') as f:
             empty_spaces = pyjson.load(f)
-        if not empty_spaces:
+        if not has_heygen:
+            print("[COMBINED API] HeyGen disabled (has_heygen=false), skipping avatar overlays")
+            overlay_filename = None
+        elif not empty_spaces:
             print("[COMBINED API] No empty spaces found for HeyGen overlays")
             overlay_filename = None
         else:
