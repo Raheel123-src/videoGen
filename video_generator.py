@@ -170,6 +170,7 @@ def test_moviepy_ffmpeg():
 
 def get_best_encoder():
     """Get the best available encoder with MAXIMUM performance while maintaining quality"""
+    import os
     gpu_encoders, cpu_encoders = detect_available_encoders()
     
     print_flush(f"[ENCODER DETECT] Available GPU encoders: {gpu_encoders}")
@@ -227,20 +228,27 @@ def get_best_encoder():
                 print_flush(f"[ENCODER TEST] Using MoviePy FFmpeg: {ffmpeg_binary}")
             
             for preset in presets_to_try:
+                # Use Windows-compatible temporary path
+                import tempfile
+                temp_dir = tempfile.gettempdir()
+                test_output = os.path.join(temp_dir, 'test_output.mp4')
+                
                 test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                           '-c:v', encoder_name, '-preset', preset, '-y', '/tmp/test_output.mp4']
+                           '-c:v', encoder_name, '-preset', preset, '-y', test_output]
                 
                 result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10)
                 if result.returncode == 0:
                     # Additional test: try to encode with MoviePy-like parameters
+                    moviepy_test_output = os.path.join(temp_dir, 'moviepy_test.mp4')
                     moviepy_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                                       '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-y', '/tmp/moviepy_test.mp4']
+                                       '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-y', moviepy_test_output]
                     
                     moviepy_result = subprocess.run(moviepy_test_cmd, capture_output=True, text=True, timeout=10)
                     if moviepy_result.returncode == 0:
                         # Final test: try with the exact MoviePy parameters we'll use
+                        final_test_output = os.path.join(temp_dir, 'final_test.mp4')
                         final_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                                         '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-c:a', 'aac', '-y', '/tmp/final_test.mp4']
+                                         '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-c:a', 'aac', '-y', final_test_output]
                         
                         final_result = subprocess.run(final_test_cmd, capture_output=True, text=True, timeout=10)
                         if final_result.returncode == 0:
@@ -250,8 +258,9 @@ def get_best_encoder():
                             break
                         else:
                             # Try alternative approach: use different FFmpeg parameters
+                            alt_test_output = os.path.join(temp_dir, 'alt_test.mp4')
                             alt_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                                           '-c:v', encoder_name, '-preset', preset, '-y', '/tmp/alt_test.mp4']
+                                           '-c:v', encoder_name, '-preset', preset, '-y', alt_test_output]
                             
                             alt_result = subprocess.run(alt_test_cmd, capture_output=True, text=True, timeout=10)
                             if alt_result.returncode == 0:
@@ -295,11 +304,11 @@ def get_best_encoder():
                     # Try with different FFmpeg configurations
                     alt_configs = [
                         [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                         '-c:v', encoder_name, '-preset', 'fast', '-y', '/tmp/alt1.mp4'],
+                         '-c:v', encoder_name, '-preset', 'fast', '-y', os.path.join(temp_dir, 'alt1.mp4')],
                         [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                         '-c:v', encoder_name, '-y', '/tmp/alt2.mp4'],
+                         '-c:v', encoder_name, '-y', os.path.join(temp_dir, 'alt2.mp4')],
                         [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                         '-c:v', encoder_name, '-preset', 'ultrafast', '-y', '/tmp/alt3.mp4']
+                         '-c:v', encoder_name, '-preset', 'ultrafast', '-y', os.path.join(temp_dir, 'alt3.mp4')]
                     ]
                     
                     for i, config in enumerate(alt_configs):
@@ -367,7 +376,27 @@ def get_best_encoder():
                 'preset': working_preset,  # Use the tested working preset
                 'threads': 16,  # More threads for L4 GPU
                 'verbose': False,
-                'logger': None
+                'logger': None,
+                # FFmpeg parameters for color accuracy and performance
+                'ffmpeg_params': [
+                    '-pix_fmt', 'yuv420p',  # Standard pixel format
+                    '-colorspace', 'bt709',  # Standard color space
+                    '-color_primaries', 'bt709',  # Standard color primaries
+                    '-color_trc', 'bt709',  # Standard color transfer characteristics
+                    '-color_range', 'tv',  # Standard color range
+                    '-profile:v', 'main',  # Main profile for compatibility
+                    '-level', '4.1',  # Standard level
+                    '-rc', 'vbr',  # Variable bitrate for better quality
+                    '-cq', '18',  # Constant quality setting (lower = better quality)
+                    '-b:v', '5M',  # Target bitrate for quality
+                    '-maxrate', '10M',  # Maximum bitrate
+                    '-bufsize', '10M',  # Buffer size
+                    '-g', '60',  # GOP size for better compression
+                    '-bf', '3',  # B-frames for better compression
+                    '-refs', '6',  # Reference frames for better quality
+                    '-movflags', '+faststart',  # Optimize for web streaming
+                    '-tag:v', 'avc1'  # Proper codec tag
+                ]
             }
         elif 'qsv' in encoder_name:
             # Intel QSV - Maximum performance with quality maintained
@@ -378,7 +407,27 @@ def get_best_encoder():
                 'preset': working_preset,  # Use the tested working preset
                 'threads': 16,
                 'verbose': False,
-                'logger': None
+                'logger': None,
+                # FFmpeg parameters for color accuracy and performance
+                'ffmpeg_params': [
+                    '-pix_fmt', 'yuv420p',
+                    '-colorspace', 'bt709',
+                    '-color_primaries', 'bt709',
+                    '-color_trc', 'bt709',
+                    '-color_range', 'tv',
+                    '-profile:v', 'main',
+                    '-level', '4.1',
+                    '-rc', 'vbr',
+                    '-cq', '18',
+                    '-b:v', '5M',
+                    '-maxrate', '10M',
+                    '-bufsize', '10M',
+                    '-g', '60',
+                    '-bf', '3',
+                    '-refs', '6',
+                    '-movflags', '+faststart',
+                    '-tag:v', 'avc1'
+                ]
             }
         elif 'amf' in encoder_name:
             # AMD AMF - Maximum performance with quality maintained
@@ -389,7 +438,27 @@ def get_best_encoder():
                 'preset': working_preset,  # Use the tested working preset
                 'threads': 16,
                 'verbose': False,
-                'logger': None
+                'logger': None,
+                # FFmpeg parameters for color accuracy and performance
+                'ffmpeg_params': [
+                    '-pix_fmt', 'yuv420p',
+                    '-colorspace', 'bt709',
+                    '-color_primaries', 'bt709',
+                    '-color_trc', 'bt709',
+                    '-color_range', 'tv',
+                    '-profile:v', 'main',
+                    '-level', '4.1',
+                    '-rc', 'vbr',
+                    '-cq', '18',
+                    '-b:v', '5M',
+                    '-maxrate', '10M',
+                    '-bufsize', '10M',
+                    '-g', '60',
+                    '-bf', '3',
+                    '-refs', '6',
+                    '-movflags', '+faststart',
+                    '-tag:v', 'avc1'
+                ]
             }
         else:
             # Generic GPU encoder
@@ -400,7 +469,27 @@ def get_best_encoder():
                 'preset': working_preset,  # Use the tested working preset
                 'threads': 16,
                 'verbose': False,
-                'logger': None
+                'logger': None,
+                # FFmpeg parameters for color accuracy and performance
+                'ffmpeg_params': [
+                    '-pix_fmt', 'yuv420p',
+                    '-colorspace', 'bt709',
+                    '-color_primaries', 'bt709',
+                    '-color_trc', 'bt709',
+                    '-color_range', 'tv',
+                    '-profile:v', 'main',
+                    '-level', '4.1',
+                    '-rc', 'vbr',
+                    '-cq', '18',
+                    '-b:v', '5M',
+                    '-maxrate', '10M',
+                    '-bufsize', '10M',
+                    '-g', '60',
+                    '-bf', '3',
+                    '-refs', '6',
+                    '-movflags', '+faststart',
+                    '-tag:v', 'avc1'
+                ]
             }
     
     # Fallback to CPU encoder (optimized for speed with quality)
@@ -676,6 +765,8 @@ class VideoGenerator:
         sample_img = None
         if ideogram_img_path and os.path.exists(ideogram_img_path):
             sample_img = Image.open(ideogram_img_path)
+            # Apply color correction to fix Ideogram tinting issues
+            sample_img = self._correct_ideogram_colors(sample_img)
         else:
             # Fallback to sample image if Ideogram image doesn't exist
             sample_img_path = os.path.join('uploads', 'sample_image.jpg')
@@ -1529,6 +1620,58 @@ class VideoGenerator:
         if current_line:
             lines.append(current_line)
         return lines
+
+    def _correct_ideogram_colors(self, img):
+        """Correct color balance for Ideogram images to fix tinting issues"""
+        try:
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Convert to numpy array for color analysis
+            import numpy as np
+            img_array = np.array(img)
+            
+            # Calculate channel averages
+            red_channel = img_array[:, :, 0].mean()
+            green_channel = img_array[:, :, 1].mean()
+            blue_channel = img_array[:, :, 2].mean()
+            
+            # Check if color correction is needed (if blue channel is significantly higher)
+            channel_diff = max(red_channel, green_channel, blue_channel) - min(red_channel, green_channel, blue_channel)
+            
+            if channel_diff > 15:  # Significant color imbalance detected
+                print_flush(f"[COLOR CORRECTION] Applying color correction to Ideogram image")
+                print_flush(f"[COLOR CORRECTION] Before - R:{red_channel:.1f} G:{green_channel:.1f} B:{blue_channel:.1f}")
+                
+                # Apply color correction to reduce blue tint
+                # Increase red and green channels slightly, reduce blue channel
+                correction_factor = 1.1  # Increase red and green by 10%
+                blue_reduction = 0.9     # Reduce blue by 10%
+                
+                # Apply correction
+                img_array[:, :, 0] = np.clip(img_array[:, :, 0] * correction_factor, 0, 255)  # Red
+                img_array[:, :, 1] = np.clip(img_array[:, :, 1] * correction_factor, 0, 255)  # Green
+                img_array[:, :, 2] = np.clip(img_array[:, :, 2] * blue_reduction, 0, 255)     # Blue
+                
+                # Convert back to PIL Image
+                corrected_img = Image.fromarray(img_array.astype(np.uint8))
+                
+                # Verify correction
+                corrected_array = np.array(corrected_img)
+                new_red = corrected_array[:, :, 0].mean()
+                new_green = corrected_array[:, :, 1].mean()
+                new_blue = corrected_array[:, :, 2].mean()
+                print_flush(f"[COLOR CORRECTION] After - R:{new_red:.1f} G:{new_green:.1f} B:{new_blue:.1f}")
+                
+                return corrected_img
+            else:
+                print_flush(f"[COLOR CORRECTION] No correction needed - colors are balanced")
+                return img
+                
+        except Exception as e:
+            print_flush(f"[COLOR CORRECTION] Error applying color correction: {e}")
+            return img
 
     def _center_crop_cover(self, img, target_width, target_height):
         # Scale and crop the image to fill the target size (center crop, no squeeze)
