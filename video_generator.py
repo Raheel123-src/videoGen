@@ -577,11 +577,11 @@ class VideoGenerator:
         self.font_folder = font_folder
         self.session_id = session_id
         
-        # Load fonts
-        self.title_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 72)
-        self.body_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 36)
-        self.subtitle_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 48)
-        self.subtitle_overlay_font = ImageFont.truetype(os.path.join(font_folder, 'CircularStd-Book.ttf'), 42)
+        # Load fonts with Hindi support
+        self.title_font = self._get_font_for_language("", 72)
+        self.body_font = self._get_font_for_language("", 36)
+        self.subtitle_font = self._get_font_for_language("", 48)
+        self.subtitle_overlay_font = self._get_font_for_language("", 42)
         
         # Video dimensions and settings
         self.width = 1920
@@ -594,6 +594,41 @@ class VideoGenerator:
         
         # Load word segments for subtitle generation
         self.word_segments = []
+    
+    def _detect_hindi_script(self, text):
+        """Detect if text contains Hindi Devanagari characters"""
+        hindi_chars = set('अआइईउऊएऐओऔकखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसहक्षत्रज्ञड़ढ़')
+        return any(char in hindi_chars for char in text)
+    
+    def _get_font_for_language(self, text, font_size=48):
+        """Detect language and return appropriate font with similar style"""
+        # Hindi character detection
+        hindi_chars = set('अआइईउऊएऐओऔकखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसहक्षत्रज्ञड़ढ़')
+        
+        # Check if text contains Hindi characters
+        if any(char in hindi_chars for char in text):
+            # Use system fonts that support Hindi Devanagari script
+            system_fonts = [
+                'C:/Windows/Fonts/arial.ttf',  # Windows Arial (supports Hindi)
+                'C:/Windows/Fonts/calibri.ttf',  # Windows Calibri (supports Hindi)
+                'C:/Windows/Fonts/segoeui.ttf',  # Windows Segoe UI (supports Hindi)
+                '/System/Library/Fonts/Arial Unicode MS.ttf',  # macOS
+                '/System/Library/Fonts/Helvetica.ttc',  # macOS fallback
+                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',  # Linux
+            ]
+            
+            for font_path in system_fonts:
+                try:
+                    return ImageFont.truetype(font_path, font_size)
+                except:
+                    continue
+            
+            # Final fallback to CircularStd if no Hindi fonts found
+            print_flush(f"[FONT] Warning: No Hindi fonts found, using CircularStd (may not display Hindi properly)")
+            return ImageFont.truetype(os.path.join(self.font_folder, 'CircularStd-Book.ttf'), font_size)
+        else:
+            # Use existing CircularStd for Latin scripts
+            return ImageFont.truetype(os.path.join(self.font_folder, 'CircularStd-Book.ttf'), font_size)
     
     def load_segments_data(self, segments_file):
         """Load segments data from JSON file"""
@@ -698,7 +733,8 @@ class VideoGenerator:
         draw = ImageDraw.Draw(img, 'RGBA')
         margin = 60
         max_width = self.width - 2 * margin
-        font = self.subtitle_overlay_font
+        # Get appropriate font for the text (supports Hindi)
+        font = self._get_font_for_language(subtitle_text, 42)
         # Wrap subtitle if needed
         words = subtitle_text.split()
         lines = []
@@ -782,10 +818,12 @@ class VideoGenerator:
             y0 = 120
             max_text_width = self.width//2 - 2*x0
             if title:
-                lines = self._wrap_text(title, self.title_font, max_text_width, draw)
+                # Get appropriate font for title (supports Hindi)
+                title_font = self._get_font_for_language(title, 72)
+                lines = self._wrap_text(title, title_font, max_text_width, draw)
                 for line in lines:
-                    draw.text((x0, y0), line, fill=self.text_color, font=self.title_font)
-                    y0 += self.title_font.size + 8
+                    draw.text((x0, y0), line, fill=self.text_color, font=title_font)
+                    y0 += title_font.size + 8
             y0 += 80  # Reduced spacing between title and bullets for smaller fonts
             fade_in_duration = 0.5
             for i, bullet in enumerate(bullets):
@@ -800,22 +838,24 @@ class VideoGenerator:
                 else:
                     highlight_word = None
                     clean_bullet = bullet_text
-                bullet_lines = self._wrap_text(clean_bullet, self.body_font, max_text_width, draw)
+                # Get appropriate font for bullet text (supports Hindi)
+                bullet_font = self._get_font_for_language(clean_bullet, 36)
+                bullet_lines = self._wrap_text(clean_bullet, bullet_font, max_text_width, draw)
                 for line in bullet_lines:
                     if highlight_word and highlight_word in line:
                         pre, word, post = line.partition(highlight_word)
-                        w_pre = draw.textbbox((0,0), pre, font=self.body_font)[2]
-                        w_word = draw.textbbox((0,0), word, font=self.body_font)[2]
-                        h_word = self.body_font.size + 8
+                        w_pre = draw.textbbox((0,0), pre, font=bullet_font)[2]
+                        w_word = draw.textbbox((0,0), word, font=bullet_font)[2]
+                        h_word = bullet_font.size + 8
                         rect_x = x0 + w_pre
                         rect_y = y0 - 4
                         draw.rounded_rectangle([rect_x, rect_y, rect_x + w_word, rect_y + h_word], radius=8, fill=(255, 215, 0, int(alpha*0.8)))
-                        draw.text((x0, y0), pre, fill=(0,0,0,alpha), font=self.body_font)
-                        draw.text((x0 + w_pre, y0), word, fill=(0,0,0,alpha), font=self.body_font)
-                        draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
+                        draw.text((x0, y0), pre, fill=(0,0,0,alpha), font=bullet_font)
+                        draw.text((x0 + w_pre, y0), word, fill=(0,0,0,alpha), font=bullet_font)
+                        draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=bullet_font)
                     else:
-                        draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 10
+                        draw.text((x0, y0), line, fill=(0,0,0,alpha), font=bullet_font)
+                    y0 += bullet_font.size + 10
             self._draw_subtitle(img, subtitle_text)
             return img
         # Format 2: Left text, right image (overlay image on right half, background is full slide)
@@ -1226,6 +1266,25 @@ class VideoGenerator:
         import os
         import shutil
         
+        # Check if script contains Hindi and auto-disable subtitles
+        hindi_detected = False
+        try:
+            # Check word segments for Hindi characters
+            word_segments = self.load_word_segments(word_srt_file)
+            for segment in word_segments:
+                if self._detect_hindi_script(segment.get('text', '')):
+                    hindi_detected = True
+                    break
+            
+            if hindi_detected:
+                print_flush(f"[SUBTITLE] Hindi script detected - automatically disabling subtitles")
+                show_subtitles = False
+            else:
+                print_flush(f"[SUBTITLE] Latin script detected - subtitles enabled: {show_subtitles}")
+        except Exception as e:
+            print_flush(f"[SUBTITLE] Error detecting script language: {e}")
+            # Default to user preference if detection fails
+        
         start_time = time.time()
         print_flush(f"[VIDEO GEN START] Starting video generation at {time.strftime('%H:%M:%S')}")
         print_flush(f"[VIDEO GEN START] Input files: segments={segments_file}, srt={word_srt_file}, audio={audio_file}")
@@ -1357,7 +1416,8 @@ class VideoGenerator:
                     def create_make_frame(slide_dict, segment_start_time, segment_idx, segment_duration):
                         def make_frame(t):
                             current_time = segment_start_time + t
-                            subtitle_text = self.create_subtitle_text(word_segments, current_time)
+                            # Only generate subtitle text if subtitles are enabled
+                            subtitle_text = self.create_subtitle_text(word_segments, current_time) if show_subtitles else None
                             # --- Animation logic ---
                             # Animation timing parameters
                             typewriter_speed = 30  # chars per second
@@ -1438,6 +1498,7 @@ class VideoGenerator:
                         last_slide,
                         reveal_time,
                         last_segment['start_time'],
+                        subtitle_text=None if not show_subtitles else self.create_subtitle_text(word_segments, reveal_time),
                         segment_duration=last_segment['duration']
                     ))
                 gap_duration = total_duration - current_duration
