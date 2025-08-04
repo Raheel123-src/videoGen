@@ -22,13 +22,22 @@ import numpy as np
 import re
 from datetime import datetime
 
+# GPU-accelerated image processing
+try:
+    import cv2
+    import cv2.cuda as cuda
+    GPU_IMAGE_PROCESSING = True
+    print("[GPU] OpenCV CUDA support detected - enabling GPU image processing")
+except ImportError:
+    GPU_IMAGE_PROCESSING = False
+    print("[GPU] OpenCV CUDA not available - using CPU image processing")
+
 # Fix PIL ANTIALIAS compatibility issue
 try:
     if not hasattr(Image, 'ANTIALIAS'):
         Image.ANTIALIAS = Image.LANCZOS
-    print("[PIL] ANTIALIAS compatibility fix applied in video_generator")
-except Exception as e:
-    print(f"[PIL] Warning: Could not apply ANTIALIAS fix in video_generator: {e}")
+except:
+    pass
 
 def detect_available_encoders():
     """Detect available GPU and CPU encoders"""
@@ -194,10 +203,10 @@ def get_best_encoder():
     # Test GPU encoders to see which ones actually work
     working_gpu_encoders = []
     
-    # Prioritize Intel QSV for cloud environments (more commonly available)
+    # Prioritize NVIDIA NVENC for maximum performance
     prioritized_encoders = []
     for encoder_name, description in gpu_encoders:
-        if 'qsv' in encoder_name:
+        if 'nvenc' in encoder_name:
             prioritized_encoders.insert(0, (encoder_name, description))
         else:
             prioritized_encoders.append((encoder_name, description))
@@ -205,18 +214,17 @@ def get_best_encoder():
     for encoder_name, description in prioritized_encoders:
         try:
             # Test if the encoder actually works by trying a simple FFmpeg command
-            # Use the exact same parameters we'll use in production
             import subprocess
             
-            # Determine the correct preset for each encoder
+            # Use fastest preset for each encoder
             if 'nvenc' in encoder_name:
-                presets_to_try = ['p1', 'p7', 'fast']  # Try fastest first, then fallback
+                presets_to_try = ['p1']  # Only try fastest preset
             elif 'qsv' in encoder_name:
-                presets_to_try = ['veryfast', 'fast', 'medium']  # Try fastest first
+                presets_to_try = ['veryfast']  # Only try fastest preset
             elif 'amf' in encoder_name:
-                presets_to_try = ['speed', 'balanced', 'quality']  # Try speed first
+                presets_to_try = ['speed']  # Only try fastest preset
             else:
-                presets_to_try = ['ultrafast', 'fast']  # Generic fallback
+                presets_to_try = ['ultrafast']  # Only try fastest preset
             
             encoder_works = False
             working_preset = None
@@ -236,44 +244,23 @@ def get_best_encoder():
                 test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
                            '-c:v', encoder_name, '-preset', preset, '-y', test_output]
                 
-                result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10)
+                result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=5)  # Reduced timeout
                 if result.returncode == 0:
-                    # Additional test: try to encode with MoviePy-like parameters
+                    # Quick test: try to encode with MoviePy-like parameters
                     moviepy_test_output = os.path.join(temp_dir, 'moviepy_test.mp4')
                     moviepy_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
                                        '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-y', moviepy_test_output]
                     
-                    moviepy_result = subprocess.run(moviepy_test_cmd, capture_output=True, text=True, timeout=10)
+                    moviepy_result = subprocess.run(moviepy_test_cmd, capture_output=True, text=True, timeout=5)  # Reduced timeout
                     if moviepy_result.returncode == 0:
-                        # Final test: try with the exact MoviePy parameters we'll use
-                        final_test_output = os.path.join(temp_dir, 'final_test.mp4')
-                        final_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                                         '-c:v', encoder_name, '-preset', preset, '-f', 'mp4', '-c:a', 'aac', '-y', final_test_output]
-                        
-                        final_result = subprocess.run(final_test_cmd, capture_output=True, text=True, timeout=10)
-                        if final_result.returncode == 0:
-                            encoder_works = True
-                            working_preset = preset
-                            print_flush(f"[ENCODER TEST] ✅ {encoder_name} works with preset '{preset}' (MoviePy compatible)!")
-                            break
-                        else:
-                            # Try alternative approach: use different FFmpeg parameters
-                            alt_test_output = os.path.join(temp_dir, 'alt_test.mp4')
-                            alt_test_cmd = [ffmpeg_binary, '-f', 'lavfi', '-i', 'testsrc=duration=1:size=320x240:rate=1', 
-                                           '-c:v', encoder_name, '-preset', preset, '-y', alt_test_output]
-                            
-                            alt_result = subprocess.run(alt_test_cmd, capture_output=True, text=True, timeout=10)
-                            if alt_result.returncode == 0:
-                                encoder_works = True
-                                working_preset = preset
-                                print_flush(f"[ENCODER TEST] ✅ {encoder_name} works with preset '{preset}' (alternative method)!")
-                                break
-                            else:
-                                print_flush(f"[ENCODER TEST] ⚠️ {encoder_name} works with preset '{preset}' but all tests failed")
+                        encoder_works = True
+                        working_preset = preset
+                        print_flush(f"[ENCODER TEST] ✅ {encoder_name} works with preset '{preset}' (MoviePy compatible)!")
+                        break
                     else:
-                        print_flush(f"[ENCODER TEST] ⚠️ {encoder_name} works with preset '{preset}' but MoviePy test failed: {moviepy_result.stderr}")
+                        print_flush(f"[ENCODER TEST] ⚠️ {encoder_name} works with preset '{preset}' but MoviePy test failed")
                 else:
-                    print_flush(f"[ENCODER TEST] ❌ {encoder_name} failed with preset '{preset}': {result.stderr}")
+                    print_flush(f"[ENCODER TEST] ❌ {encoder_name} failed with preset '{preset}'")
             
             if encoder_works:
                 working_gpu_encoders.append((encoder_name, description, working_preset))
@@ -370,6 +357,7 @@ def get_best_encoder():
         if 'nvenc' in encoder_name:
             # NVIDIA NVENC - Maximum performance with quality maintained
             return {
+                'gpu_detected': True,  # Add this key for proper detection
                 'fps': 30,
                 'codec': encoder_name,
                 'audio_codec': 'aac',
@@ -377,23 +365,23 @@ def get_best_encoder():
                 'threads': 16,  # More threads for L4 GPU
                 'verbose': False,
                 'logger': None,
-                # FFmpeg parameters for color accuracy and performance
+                # FFmpeg parameters for MAXIMUM SPEED (NVENC-specific)
                 'ffmpeg_params': [
                     '-pix_fmt', 'yuv420p',  # Standard pixel format
                     '-colorspace', 'bt709',  # Standard color space
                     '-color_primaries', 'bt709',  # Standard color primaries
                     '-color_trc', 'bt709',  # Standard color transfer characteristics
                     '-color_range', 'tv',  # Standard color range
-                    '-profile:v', 'main',  # Main profile for compatibility
-                    '-level', '4.1',  # Standard level
+                    '-profile:v', 'baseline',  # Baseline profile for maximum speed
+                    # NVENC doesn't support -level parameter, so we omit it
                     '-rc', 'vbr',  # Variable bitrate for better quality
-                    '-cq', '18',  # Constant quality setting (lower = better quality)
-                    '-b:v', '5M',  # Target bitrate for quality
-                    '-maxrate', '10M',  # Maximum bitrate
-                    '-bufsize', '10M',  # Buffer size
-                    '-g', '60',  # GOP size for better compression
-                    '-bf', '3',  # B-frames for better compression
-                    '-refs', '6',  # Reference frames for better quality
+                    '-cq', '23',  # Higher CQ for faster encoding (was 18)
+                    '-b:v', '3M',  # Lower bitrate for speed (was 5M)
+                    '-maxrate', '6M',  # Lower maxrate for speed (was 10M)
+                    '-bufsize', '6M',  # Lower buffer for speed (was 10M)
+                    '-g', '30',  # Smaller GOP for speed (was 60)
+                    '-bf', '1',  # Fewer B-frames for speed (was 3)
+                    '-refs', '3',  # Fewer refs for speed (was 6)
                     '-movflags', '+faststart',  # Optimize for web streaming
                     '-tag:v', 'avc1'  # Proper codec tag
                 ]
@@ -401,6 +389,7 @@ def get_best_encoder():
         elif 'qsv' in encoder_name:
             # Intel QSV - Maximum performance with quality maintained
             return {
+                'gpu_detected': True,  # Add this key for proper detection
                 'fps': 30,
                 'codec': encoder_name,
                 'audio_codec': 'aac',
@@ -408,7 +397,7 @@ def get_best_encoder():
                 'threads': 16,
                 'verbose': False,
                 'logger': None,
-                # FFmpeg parameters for color accuracy and performance
+                # FFmpeg parameters for color accuracy and performance (QSV-specific)
                 'ffmpeg_params': [
                     '-pix_fmt', 'yuv420p',
                     '-colorspace', 'bt709',
@@ -416,7 +405,7 @@ def get_best_encoder():
                     '-color_trc', 'bt709',
                     '-color_range', 'tv',
                     '-profile:v', 'main',
-                    '-level', '4.1',
+                    # QSV may not support -level parameter, so we omit it
                     '-rc', 'vbr',
                     '-cq', '18',
                     '-b:v', '5M',
@@ -432,6 +421,7 @@ def get_best_encoder():
         elif 'amf' in encoder_name:
             # AMD AMF - Maximum performance with quality maintained
             return {
+                'gpu_detected': True,  # Add this key for proper detection
                 'fps': 30,
                 'codec': encoder_name,
                 'audio_codec': 'aac',
@@ -439,7 +429,7 @@ def get_best_encoder():
                 'threads': 16,
                 'verbose': False,
                 'logger': None,
-                # FFmpeg parameters for color accuracy and performance
+                # FFmpeg parameters for color accuracy and performance (AMF-specific)
                 'ffmpeg_params': [
                     '-pix_fmt', 'yuv420p',
                     '-colorspace', 'bt709',
@@ -447,7 +437,7 @@ def get_best_encoder():
                     '-color_trc', 'bt709',
                     '-color_range', 'tv',
                     '-profile:v', 'main',
-                    '-level', '4.1',
+                    # AMF may not support -level parameter, so we omit it
                     '-rc', 'vbr',
                     '-cq', '18',
                     '-b:v', '5M',
@@ -463,6 +453,7 @@ def get_best_encoder():
         else:
             # Generic GPU encoder
             return {
+                'gpu_detected': True,  # Add this key for proper detection
                 'fps': 30,
                 'codec': encoder_name,
                 'audio_codec': 'aac',
@@ -470,7 +461,7 @@ def get_best_encoder():
                 'threads': 16,
                 'verbose': False,
                 'logger': None,
-                # FFmpeg parameters for color accuracy and performance
+                # FFmpeg parameters for color accuracy and performance (GPU-specific)
                 'ffmpeg_params': [
                     '-pix_fmt', 'yuv420p',
                     '-colorspace', 'bt709',
@@ -478,7 +469,7 @@ def get_best_encoder():
                     '-color_trc', 'bt709',
                     '-color_range', 'tv',
                     '-profile:v', 'main',
-                    '-level', '4.1',
+                    # GPU encoders may not support -level parameter, so we omit it
                     '-rc', 'vbr',
                     '-cq', '18',
                     '-b:v', '5M',
@@ -499,6 +490,7 @@ def get_best_encoder():
         print_flush(f"[ENCODER DETECT] Using CPU encoder: {encoder_name} ({description})")
         
         return {
+            'gpu_detected': False,  # Add this key for proper detection
             'fps': 30,
             'codec': encoder_name,
             'audio_codec': 'aac',
@@ -511,6 +503,7 @@ def get_best_encoder():
     else:
         print_flush("[ENCODER DETECT] No suitable encoders found, using default")
         return {
+            'gpu_detected': False,  # Add this key for proper detection
             'fps': 30,
             'codec': 'libx264',
             'audio_codec': 'aac',
@@ -572,25 +565,39 @@ def get_video_generation_status():
 
 class VideoGenerator:
     def __init__(self, segments_folder, transcripts_folder, font_folder, session_id=None):
+        """Initialize VideoGenerator with GPU acceleration support"""
         self.segments_folder = segments_folder
         self.transcripts_folder = transcripts_folder
         self.font_folder = font_folder
         self.session_id = session_id
         
-        # Load fonts with Hindi support
-        self.title_font = self._get_font_for_language("", 72)
-        self.body_font = self._get_font_for_language("", 36)
-        self.subtitle_font = self._get_font_for_language("", 48)
-        self.subtitle_overlay_font = self._get_font_for_language("", 42)
+        # Debug mode for logging
+        self.debug_mode = False  # Disable debug logging for better performance
         
-        # Video dimensions and settings
+        # Video dimensions
         self.width = 1920
         self.height = 1080
-        self.fps = 30
-        self.background_color = (255, 255, 255)  # White
+        self.fps = 30  # Add missing fps attribute
         
         # Colors
-        self.text_color = (0, 0, 0)
+        self.text_color = (0, 0, 0)  # Black for better visibility
+        self.subtitle_color = (255, 255, 255)  # White
+        self.subtitle_bg_color = (0, 0, 0, 128)  # Semi-transparent black
+        
+        # Font loading with GPU acceleration
+        self._load_fonts()
+        
+        # GPU image processing setup
+        self.gpu_image_processing = GPU_IMAGE_PROCESSING
+        if self.gpu_image_processing:
+            print(f"[GPU] Initializing GPU image processing for session: {session_id}")
+            # Initialize CUDA memory pool for better performance
+            try:
+                cuda.setDevice(0)
+                print(f"[GPU] CUDA device 0 selected for image processing")
+            except Exception as e:
+                print(f"[GPU] Warning: Could not set CUDA device: {e}")
+                self.gpu_image_processing = False
         
         # Load word segments for subtitle generation
         self.word_segments = []
@@ -599,6 +606,16 @@ class VideoGenerator:
         """Detect if text contains Hindi Devanagari characters"""
         hindi_chars = set('अआइईउऊएऐओऔकखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसहक्षत्रज्ञड़ढ़')
         return any(char in hindi_chars for char in text)
+    
+    def _load_fonts(self):
+        # Load fonts with Hindi support
+        self.title_font = self._get_font_for_language("", 72)
+        self.body_font = self._get_font_for_language("", 36)
+        self.subtitle_font = self._get_font_for_language("", 48)
+        self.subtitle_overlay_font = self._get_font_for_language("", 42)
+        
+        if self.debug_mode:
+            print_flush(f"[FONT DEBUG] Loaded fonts - Title: {self.title_font}, Body: {self.body_font}")
     
     def _get_font_for_language(self, text, font_size=48):
         """Detect language and return appropriate font with similar style"""
@@ -769,7 +786,7 @@ class VideoGenerator:
             draw.text((x_line, y_line), line, fill=(0,0,0), font=font)
             y_line += font.size + 8
 
-    def create_slide_image(self, slide_dict, current_time, segment_start_time, slide_bullet_offset=0, background_img=None, subtitle_text=None, reveal_state=None, segment_duration=None):
+    def create_slide_image(self, slide_dict, current_time, segment_start_time, slide_bullet_offset=0, background_img=None, subtitle_text=None, reveal_state=None, segment_duration=None, cached_ideogram_img=None):
         """Render slide from slide_dict (JSON) according to format, with typewriter and highlight animation."""
         format_type = slide_dict.get('format', 1)
         title = slide_dict.get('title', None)
@@ -783,34 +800,51 @@ class VideoGenerator:
         slide_number = slide_dict.get('slide_number', 1)
         format_type = slide_dict.get('format', 1)
         
-        # Look for images in session-specific folder first, then fallback to global folder
-        ideogram_img_path = None
-        if self.session_id:
-            # Try session-specific folder first
-            session_img_path = os.path.join('generated_images_ideogram', self.session_id, f'slide_{slide_number}_format_{format_type}.png')
-            if os.path.exists(session_img_path):
-                ideogram_img_path = session_img_path
-                print_flush(f"[IMAGE] Using session-specific Ideogram image: {ideogram_img_path}")
-        
-        # Fallback to global folder if session-specific image not found
-        if ideogram_img_path is None:
-            ideogram_img_path = os.path.join('generated_images_ideogram', f'slide_{slide_number}_format_{format_type}.png')
-            if os.path.exists(ideogram_img_path):
-                print_flush(f"[IMAGE] Using global Ideogram image: {ideogram_img_path}")
-        
+        # Use cached Ideogram image if provided (performance optimization)
         sample_img = None
-        if ideogram_img_path and os.path.exists(ideogram_img_path):
-            sample_img = Image.open(ideogram_img_path)
-            # Apply color correction to fix Ideogram tinting issues
-            sample_img = self._correct_ideogram_colors(sample_img)
+        if cached_ideogram_img is not None:
+            # Use pre-processed cached image
+            sample_img = Image.fromarray(cached_ideogram_img)
+            if self.debug_mode and current_time < 0.1:  # Only log first few frames
+                print_flush(f"[IMAGE] Using cached pre-processed Ideogram image for slide {slide_number}")
         else:
-            # Fallback to sample image if Ideogram image doesn't exist
-            sample_img_path = os.path.join('uploads', 'sample_image.jpg')
-            if os.path.exists(sample_img_path):
-                sample_img = Image.open(sample_img_path)
-                print_flush(f"[IMAGE] Using fallback sample image: {sample_img_path}")
+            # Fallback to loading from file (original method)
+            ideogram_img_path = None
+            if self.session_id:
+                # Try session-specific folder first
+                session_img_path = os.path.join('generated_images_ideogram', self.session_id, f'slide_{slide_number}_format_{format_type}.png')
+                if os.path.exists(session_img_path):
+                    ideogram_img_path = session_img_path
+                    if self.debug_mode:
+                        print_flush(f"[IMAGE] Using session-specific Ideogram image: {ideogram_img_path}")
+            
+            # Fallback to global folder if session-specific image not found
+            if ideogram_img_path is None:
+                ideogram_img_path = os.path.join('generated_images_ideogram', f'slide_{slide_number}_format_{format_type}.png')
+            if os.path.exists(ideogram_img_path):
+                if self.debug_mode:
+                    print_flush(f"[IMAGE] Using global Ideogram image: {ideogram_img_path}")
+            
+            if ideogram_img_path and os.path.exists(ideogram_img_path):
+                sample_img = Image.open(ideogram_img_path)
+                # Apply GPU-accelerated color correction to fix Ideogram tinting issues
+                if self.gpu_image_processing:
+                    sample_img = self._gpu_color_correction(sample_img)
+                    if self.debug_mode:
+                        print_flush(f"[GPU] Applied GPU color correction to Ideogram image")
+                else:
+                    sample_img = self._correct_ideogram_colors(sample_img)
             else:
-                print_flush(f"[IMAGE] No image found for slide {slide_number}, format {format_type}")
+                # Fallback to sample image if Ideogram image doesn't exist
+                sample_img_path = os.path.join('uploads', 'sample_image.jpg')
+                if os.path.exists(sample_img_path):
+                    sample_img = Image.open(sample_img_path)
+                    if self.debug_mode:
+                        print_flush(f"[IMAGE] Using fallback sample image: {sample_img_path}")
+                else:
+                    if self.debug_mode:
+                        print_flush(f"[IMAGE] No image found for slide {slide_number}, format {format_type}")
+        
         # Format 1: Heading + Bullets (text-only)
         if format_type == 1:
             draw = ImageDraw.Draw(img)
@@ -822,6 +856,8 @@ class VideoGenerator:
                 title_font = self._get_font_for_language(title, 72)
                 lines = self._wrap_text(title, title_font, max_text_width, draw)
                 for line in lines:
+                    if self.debug_mode and current_time < 0.1:  # Only log first few frames
+                        print_flush(f"[TITLE DEBUG] Format 1 - Drawing title line: '{line}' at position ({x0}, {y0}) with color {self.text_color}")
                     draw.text((x0, y0), line, fill=self.text_color, font=title_font)
                     y0 += title_font.size + 8
             y0 += 80  # Reduced spacing between title and bullets for smaller fonts
@@ -945,6 +981,8 @@ class VideoGenerator:
                 chars_drawn = 0
                 for line in lines:
                     line_to_draw = line[:max(0, min(len(line), chars_to_show - chars_drawn))]
+                    if self.debug_mode and current_time < 0.1:  # Only log first few frames
+                        print_flush(f"[TITLE DEBUG] Drawing title line: '{line_to_draw}' at position ({x0}, {y0}) with color {self.text_color}")
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
                     y0 += self.title_font.size + 10
@@ -1086,6 +1124,8 @@ class VideoGenerator:
                 chars_drawn = 0
                 for line in lines:
                     line_to_draw = line[:max(0, min(len(line), chars_to_show - chars_drawn))]
+                    if self.debug_mode and current_time < 0.1:  # Only log first few frames
+                        print_flush(f"[TITLE DEBUG] Drawing title line: '{line_to_draw}' at position ({x0}, {y0}) with color {self.text_color}")
                     draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
                     chars_drawn += len(line)
                     y0 += self.title_font.size + 10
@@ -1259,84 +1299,40 @@ class VideoGenerator:
         return current_sentence_text
     
     def generate_video(self, segments_file, word_srt_file, audio_file, output_file, show_subtitles=True, selected_background=None):
-        """Generate video from segments with audio"""
-        import time
-        import psutil
-        import gc
-        import os
-        import shutil
-        
-        # Check if script contains Hindi and auto-disable subtitles
-        hindi_detected = False
+        """Generate video from segments, SRT, and audio files"""
         try:
-            # Check word segments for Hindi characters
-            word_segments = self.load_word_segments(word_srt_file)
-            for segment in word_segments:
-                if self._detect_hindi_script(segment.get('text', '')):
-                    hindi_detected = True
-                    break
-            
-            if hindi_detected:
-                print_flush(f"[SUBTITLE] Hindi script detected - automatically disabling subtitles")
+            # Check for Hindi script and auto-disable subtitles
+            segments_data = self.load_segments_data(segments_file)
+            all_text = ' '.join([seg.get('text', '') for seg in segments_data['segments']])
+            if self._detect_hindi_script(all_text):
+                print_flush("[SUBTITLE] Hindi script detected - automatically disabling subtitles")
                 show_subtitles = False
-            else:
-                print_flush(f"[SUBTITLE] Latin script detected - subtitles enabled: {show_subtitles}")
-        except Exception as e:
-            print_flush(f"[SUBTITLE] Error detecting script language: {e}")
-            # Default to user preference if detection fails
-        
-        start_time = time.time()
-        print_flush(f"[VIDEO GEN START] Starting video generation at {time.strftime('%H:%M:%S')}")
-        print_flush(f"[VIDEO GEN START] Input files: segments={segments_file}, srt={word_srt_file}, audio={audio_file}")
-        print_flush(f"[VIDEO GEN START] Output file: {output_file}")
-        print_flush(f"[VIDEO GEN START] Memory usage: {psutil.virtual_memory().percent}%")
-        
-        # Check MoviePy version and configuration
-        try:
-            import moviepy
-            print_flush(f"[VIDEO GEN START] MoviePy version: {moviepy.__version__}")
-        except:
-            print_flush(f"[VIDEO GEN START] Could not determine MoviePy version")
-        
-        # Configure for GPU environment (Modal L4)
-        try:
-            import os
-            # Check if we're in a GPU environment
-            gpu_available = os.environ.get('CUDA_VISIBLE_DEVICES') is not None or os.environ.get('GPU') is not None
-            print_flush(f"[VIDEO GEN START] GPU environment detected: {gpu_available}")
             
-            if gpu_available:
-                print_flush(f"[VIDEO GEN START] Configuring for GPU acceleration (Modal L4)")
-                # Enable GPU acceleration for Modal L4
+            # Force GPU mode if NVIDIA encoder is detected
+            gpu_encoders, cpu_encoders = detect_available_encoders()
+            if any('nvenc' in encoder[0] for encoder in gpu_encoders):
+                print_flush("[VIDEO GEN START] GPU encoder detected: True")
+                print_flush("[VIDEO GEN START] Forcing GPU mode - NVIDIA encoder detected!")
                 os.environ['MOVIEPY_USE_GPU'] = '1'
                 os.environ['FFMPEG_GPU'] = '1'
-                # Set NVIDIA-specific environment variables
                 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
                 os.environ['NVIDIA_VISIBLE_DEVICES'] = '0'
-            else:
-                print_flush(f"[VIDEO GEN START] Using CPU-only mode")
-                os.environ['MOVIEPY_USE_GPU'] = '0'
-                os.environ['FFMPEG_GPU'] = '0'
-        except:
-            print_flush(f"[VIDEO GEN START] Could not configure GPU settings")
-        
-        # Initialize progress tracking
-        global video_generation_progress
-        video_generation_progress['is_running'] = True
-        video_generation_progress['start_time'] = start_time
-        update_progress("Starting video generation")
-        
-        try:
+            
+            print_flush(f"[VIDEO GEN START] Starting video generation at {datetime.now().strftime('%H:%M:%S')}")
+            print_flush(f"[VIDEO GEN START] Input files: segments={segments_file}, srt={word_srt_file}, audio={audio_file}")
+            print_flush(f"[VIDEO GEN START] Output file: {output_file}")
+            print_flush(f"[VIDEO GEN START] Memory usage: {psutil.virtual_memory().percent}%")
+            print_flush(f"[VIDEO GEN START] MoviePy version: {VideoFileClip.__module__}")
+            
+            # Check GPU performance
+            gpu_stats = check_gpu_performance()
+            
+            # Detect best encoder
+            encoder_info = get_best_encoder()
+            print_flush(f"[VIDEO GEN START] GPU encoder detected: {encoder_info.get('gpu_detected', False)}")
+            
             update_progress("Cleaning up previous run files")
             print_flush("[STEP 1] Cleaning up previous run files...")
-            temp_slides_dir = "temp_slides"
-            if os.path.exists(temp_slides_dir):
-                shutil.rmtree(temp_slides_dir)
-                print_flush("[STEP 1] Removed temp_slides directory")
-            temp_subtitles_dir = "temp_subtitles"
-            if os.path.exists(temp_subtitles_dir):
-                shutil.rmtree(temp_subtitles_dir)
-                print_flush("[STEP 1] Removed temp_subtitles directory")
             
             update_progress("Loading segments data")
             print_flush("[STEP 2] Loading segments data...")
@@ -1348,127 +1344,136 @@ class VideoGenerator:
             word_segments = self.load_word_segments(word_srt_file)
             print_flush(f"[STEP 3] Loaded {len(word_segments)} word segments")
             
-            # Load slides.json
             update_progress("Loading slides.json")
             print_flush("[STEP 4] Loading slides.json...")
-            slides_json_path = os.path.join(self.segments_folder, 'slides.json')
-            with open(slides_json_path, 'r', encoding='utf-8') as f:
+            slides_file = os.path.join(os.path.dirname(segments_file), 'slides.json')
+            with open(slides_file, 'r', encoding='utf-8') as f:
                 slides = json.load(f)
             print_flush(f"[STEP 4] Loaded {len(slides)} slides from slides.json")
             
             update_progress("Creating video clips")
             print_flush("[STEP 5] Creating video clips...")
             video_clips = []
-            total_segments = len(segments_data['segments'])
             
-            # Select background image
             update_progress("Loading background image")
             print_flush("[STEP 6] Loading background image...")
-            background_img = None
             if selected_background:
-                selected_bg_path = os.path.join('background', selected_background)
-                if os.path.exists(selected_bg_path):
-                    print_flush(f'[STEP 6] Using user-selected background image: {selected_bg_path}')
-                    background_img = Image.open(selected_bg_path)
-                    print_flush(f'[STEP 6] Loaded image mode: {background_img.mode}, size: {background_img.size}')
-                    if background_img.mode != 'RGB':
-                        print_flush(f'[STEP 6][WARN] Image mode is {background_img.mode}, converting to RGB.')
-                        background_img = background_img.convert('RGB')
-                    background_img = background_img.resize((self.width, self.height))
-                    print_flush(f'[STEP 6] Resized background to {self.width}x{self.height}')
-                else:
-                    raise Exception(f'[STEP 6] Selected background not found: {selected_bg_path}')
+                background_path = os.path.join('background', selected_background)
+                print_flush(f"[STEP 6] Using user-selected background image: {background_path}")
             else:
-                background_images = glob(os.path.join('background', '*.png')) + glob(os.path.join('background', '*.jpg'))
-                if not background_images:
-                    raise Exception('[STEP 6] No background images found in background/ folder.')
-                selected_bg_path = random.choice(background_images)
-                print_flush(f'[STEP 6] Using random background image: {selected_bg_path}')
-                background_img = Image.open(selected_bg_path)
-                print_flush(f'[STEP 6] Loaded image mode: {background_img.mode}, size: {background_img.size}')
-                if background_img.mode != 'RGB':
-                    print_flush(f'[STEP 6][WARN] Image mode is {background_img.mode}, converting to RGB.')
-                    background_img = background_img.convert('RGB')
-                background_img = background_img.resize((self.width, self.height))
-                print_flush(f'[STEP 6] Resized background to {self.width}x{self.height}')
+                background_path = os.path.join('background', '1.jpg')
+                print_flush(f"[STEP 6] Using default background image: {background_path}")
             
-            def create_slide_image_with_bg(slide_dict, current_time, segment_start_time, subtitle_text=None, reveal_state=None, segment_duration=None):
-                print_flush(f'[BG] Copying background image for slide at time {current_time}')
-                # Always pass the background_img argument
-                return self.create_slide_image(slide_dict, current_time, segment_start_time, background_img=background_img, subtitle_text=subtitle_text, reveal_state=reveal_state, segment_duration=segment_duration)
+            background_img = Image.open(background_path)
+            print_flush(f"[STEP 6] Loaded image mode: {background_img.mode}, size: {background_img.size}")
+            
+            if background_img.mode == 'RGBA':
+                print_flush(f"[STEP 6][WARN] Image mode is RGBA, converting to RGB.")
+                background_img = background_img.convert('RGB')
+            
+            # Pre-cache background image for performance
+            background_img = background_img.resize((self.width, self.height), Image.LANCZOS)
+            print_flush(f"[STEP 6] Resized background to {self.width}x{self.height}")
+            
+            # Pre-cache Ideogram images and color-corrected versions for performance
+            print_flush("[STEP 6.5] Pre-caching Ideogram images...")
+            ideogram_cache = {}
+            
+            # Use session-specific directory if available, otherwise fallback to global
+            if self.session_id:
+                session_ideogram_dir = os.path.join('generated_images_ideogram', self.session_id)
+                if os.path.exists(session_ideogram_dir):
+                    ideogram_dir = session_ideogram_dir
+                    print_flush(f"[STEP 6.5] Using session-specific images: {session_ideogram_dir}")
+                else:
+                    ideogram_dir = 'generated_images_ideogram'
+                    print_flush(f"[STEP 6.5] Session directory not found, using global: {ideogram_dir}")
+            else:
+                ideogram_dir = 'generated_images_ideogram'
+                print_flush(f"[STEP 6.5] No session ID, using global: {ideogram_dir}")
+            
+            if os.path.exists(ideogram_dir):
+                for filename in os.listdir(ideogram_dir):
+                    if filename.endswith('.png') and 'slide_' in filename:
+                        filepath = os.path.join(ideogram_dir, filename)
+                        try:
+                            img = Image.open(filepath)
+                            if img.mode == 'RGBA':
+                                img = img.convert('RGB')
+                            
+                            # Apply color correction once and cache as numpy array
+                            img_array = np.array(img)
+                            corrected_img = self._correct_ideogram_colors(img_array)
+                            ideogram_cache[filename] = corrected_img
+                            if self.debug_mode:
+                                print_flush(f"[STEP 6.5] Cached color-corrected image: {filename}")
+                        except Exception as e:
+                            print_flush(f"[STEP 6.5] Error caching {filename}: {e}")
 
-            update_progress(f"Creating {total_segments} video clips")
-            print_flush(f"[STEP 7] Creating {total_segments} video clips...")
+            def create_slide_image_with_bg(slide_dict, current_time, segment_start_time, subtitle_text=None, reveal_state=None, segment_duration=None):
+                # Use cached background and pre-processed images for maximum performance
+                if self.debug_mode and current_time < 0.1:  # Only log first few frames
+                    print_flush(f'[BG] Using cached background image for slide at time {current_time}')
+                
+                # Get Ideogram image from cache
+                ideogram_filename = None
+                if 'format' in slide_dict:
+                    ideogram_filename = f"slide_{slide_dict.get('slide_id', 1)}_format_{slide_dict['format']}.png"
+                
+                # Use cached color-corrected image if available
+                cached_ideogram_img = ideogram_cache.get(ideogram_filename) if ideogram_filename else None
+                
+                # Create slide image with optimized rendering
+                return self.create_slide_image(slide_dict, current_time, segment_start_time, background_img=background_img, subtitle_text=subtitle_text, reveal_state=reveal_state, segment_duration=segment_duration, cached_ideogram_img=cached_ideogram_img)
+
+            update_progress(f"Creating {len(segments_data['segments'])} video clips")
+            print_flush(f"[STEP 7] Creating {len(segments_data['segments'])} video clips...")
             clip_creation_start = time.time()
             
             for idx, segment in enumerate(segments_data['segments']):
                 segment_start = time.time()
-                update_progress(f"Creating clip {idx+1}/{total_segments}")
-                print_flush(f"[STEP 7] Processing segment {idx+1}/{total_segments}: {segment}")
+                update_progress(f"Creating clip {idx+1}/{len(segments_data['segments'])}")
+                if self.debug_mode:
+                    print_flush(f"[STEP 7] Processing segment {idx+1}/{len(segments_data['segments'])}: {segment}")
                 print_flush(f"[STEP 7] Memory usage: {psutil.virtual_memory().percent}%")
                 
                 if idx < len(slides):
                     slide_dict = slides[idx]
-                    print_flush(f"[STEP 7] Using slide_dict for segment {idx}: title='{slide_dict.get('title', '')}'")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Using slide_dict for segment {idx}: title='{slide_dict.get('title', '')}'")
                     duration = segment['end_time'] - segment['start_time']
-                    print_flush(f"[STEP 7] Segment duration: {duration}s")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Segment duration: {duration}s")
                     
                     def create_make_frame(slide_dict, segment_start_time, segment_idx, segment_duration):
                         def make_frame(t):
                             current_time = segment_start_time + t
                             # Only generate subtitle text if subtitles are enabled
                             subtitle_text = self.create_subtitle_text(word_segments, current_time) if show_subtitles else None
-                            # --- Animation logic ---
-                            # Animation timing parameters
-                            typewriter_speed = 30  # chars per second
-                            bullet_delay = 0.5     # seconds between bullets
-                            highlight_delay = 0.5  # seconds after last bullet
-                            # Title typewriter
-                            title = slide_dict.get('title', '')
-                            total_title_chars = len(title)
-                            title_chars = min(int(typewriter_speed * t), total_title_chars)
-                            # Bullets typewriter
-                            bullets = slide_dict.get('bullets', [])
-                            bullets_to_show = []
-                            time_after_title = max(0, t - total_title_chars / typewriter_speed)
-                            for i, bullet in enumerate(bullets):
-                                start_time = i * bullet_delay
-                                if time_after_title > start_time:
-                                    chars = min(int(typewriter_speed * (time_after_title - start_time)), len(bullet))
-                                    bullets_to_show.append(chars)
-                                else:
-                                    bullets_to_show.append(0)
-                            # Highlight logic
-                            highlight_word = None
-                            if bullets:
-                                last_bullet_time = (len(bullets)-1) * bullet_delay + len(bullets[-1]) / typewriter_speed
-                                if time_after_title > last_bullet_time + highlight_delay:
-                                    # Find highlight word (first word > 3 chars in first bullet)
-                                    for bullet in bullets:
-                                        for word in bullet.split():
-                                            if len(word) > 3:
-                                                highlight_word = word
-                                                break
-                                        if highlight_word:
-                                            break
-                            reveal_state = {'title_chars': title_chars, 'bullets': bullets_to_show, 'highlight_word': highlight_word}
-                            slide_img = create_slide_image_with_bg(slide_dict, current_time, segment_start_time, subtitle_text=subtitle_text, reveal_state=reveal_state, segment_duration=segment_duration)
-                            if t < 0.1:
-                                print_flush(f"[RENDER DEBUG] Segment {segment_idx} rendering: Title='{slide_dict.get('title','')}'")
+                            
+                            # Create slide image with background (no reveal state for performance)
+                            slide_img = create_slide_image_with_bg(slide_dict, current_time, segment_start_time, subtitle_text, None, segment_duration)
+                            
+                            # Convert to numpy array for MoviePy
                             return np.array(slide_img)
                         return make_frame
                     
                     make_frame = create_make_frame(slide_dict, segment['start_time'], idx, duration)
-                    print_flush(f"[STEP 7] Creating VideoClip for segment {idx}...")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Creating VideoClip for segment {idx}...")
                     clip = VideoClip(make_frame, duration=duration)
-                    print_flush(f"[STEP 7] Created clip for segment {idx} with duration {duration}s")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Created clip for segment {idx} with duration {duration}s")
                     video_clips.append(clip)
-                    print_flush(f"[STEP 7] Total clips so far: {len(video_clips)}")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Total clips so far: {len(video_clips)}")
                     
                     segment_time = time.time() - segment_start
-                    print_flush(f"[STEP 7] Segment {idx+1} completed in {segment_time:.2f}s")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7] Segment {idx+1} completed in {segment_time:.2f}s")
                 else:
-                    print_flush(f"[STEP 7][ERROR] No slide JSON for segment {idx}")
+                    if self.debug_mode:
+                        print_flush(f"[STEP 7][ERROR] No slide JSON for segment {idx}")
             
             clip_creation_time = time.time() - clip_creation_start
             print_flush(f"[STEP 7] All clips created in {clip_creation_time:.2f}s")
@@ -1535,133 +1540,75 @@ class VideoGenerator:
             print_flush(f"[STEP 13] Video settings: fps={self.fps}, codec=libx264, preset=ultrafast, threads=8")
             print_flush(f"[STEP 13] Memory usage before write: {psutil.virtual_memory().percent}%")
             
-            write_start = time.time()
-            try:
-                # Check for any environment variables that might affect MoviePy
-                import os
-                print_flush(f"[STEP 13] Checking environment variables...")
-                moviepy_env_vars = {k: v for k, v in os.environ.items() if 'MOVIEPY' in k.upper() or 'FFMPEG' in k.upper() or 'CUDA' in k.upper() or 'GPU' in k.upper()}
-                if moviepy_env_vars:
-                    print_flush(f"[STEP 13] Found MoviePy/FFmpeg/GPU environment variables: {moviepy_env_vars}")
-                else:
-                    print_flush(f"[STEP 13] No MoviePy/FFmpeg/GPU environment variables found")
+            # Check environment variables for GPU acceleration
+            gpu_env_vars = {k: v for k, v in os.environ.items() if any(x in k.upper() for x in ['GPU', 'CUDA', 'NVIDIA'])}
+            print_flush(f"[STEP 13] Found MoviePy/FFmpeg/GPU environment variables: {gpu_env_vars}")
                 
                 # Check GPU performance before encoding
-                gpu_stats_before = check_gpu_performance()
-                if gpu_stats_before:
-                    print_flush(f"[STEP 13] GPU Status before encoding: {gpu_stats_before}")
+            gpu_stats = check_gpu_performance()
+            print_flush(f"[STEP 13] GPU Status before encoding: {gpu_stats}")
+            
+            # Detect best available encoder for MAXIMUM performance
+            print_flush("[STEP 13] Detecting best available encoder for MAXIMUM performance...")
+            encoder_info = get_best_encoder()
+            
+            # Use the best encoder found
+            if encoder_info.get('gpu_detected', False):
+                print_flush("[STEP 13] Using MAXIMUM PERFORMANCE parameters:")
+                print_flush(f"[STEP 13] {encoder_info}")
                 
-                # Use smart encoder detection with MAXIMUM performance
-                print_flush(f"[STEP 13] Detecting best available encoder for MAXIMUM performance...")
-                write_params = get_best_encoder()
-                
-                # Update fps to match self.fps
-                write_params['fps'] = self.fps
-                
-                print_flush(f"[STEP 13] Using MAXIMUM PERFORMANCE parameters: {write_params}")
-                
+                # Write video with GPU acceleration
+                write_start = time.time()
                 final_video.write_videofile(
                     output_file,
-                    **write_params
+                    fps=self.fps,
+                    codec=encoder_info['codec'],
+                    audio_codec='aac',
+                    preset=encoder_info['preset'],
+                    threads=encoder_info['threads'],
+                    verbose=False,
+                    logger=None,
+                    ffmpeg_params=encoder_info['ffmpeg_params']
                 )
-                
-                # Check GPU performance after encoding
-                gpu_stats_after = check_gpu_performance()
-                if gpu_stats_after:
-                    print_flush(f"[STEP 13] GPU Status after encoding: {gpu_stats_after}")
-                
                 write_time = time.time() - write_start
-                print_flush(f"[STEP 13] Video file written successfully in {write_time:.2f}s")
-                
-                # Performance summary
-                if gpu_stats_before and gpu_stats_after:
-                    memory_used = gpu_stats_after['memory_used_mb'] - gpu_stats_before['memory_used_mb']
-                    print_flush(f"[STEP 13] GPU Memory used during encoding: {memory_used}MB")
-                    print_flush(f"[STEP 13] GPU Utilization during encoding: {gpu_stats_after['gpu_utilization']}%")
-            except Exception as e:
-                print_flush(f"[STEP 13][ERROR] Failed to write video file: {e}")
-                print_flush(f"[STEP 13][ERROR] Error type: {type(e).__name__}")
-                
-                # Try with CPU fallback if the detected encoder failed
-                try:
-                    print_flush(f"[STEP 13] Primary encoder failed, retrying with CPU fallback...")
-                    cpu_params = {
-                        'fps': self.fps,
-                        'codec': 'libx264',
-                        'audio_codec': 'aac',
-                        'preset': 'ultrafast',
-                        'threads': 16,
-                        'verbose': False,
-                        'logger': None
-                    }
-                    print_flush(f"[STEP 13] CPU fallback parameters: {cpu_params}")
-                    final_video.write_videofile(
-                        output_file,
-                        **cpu_params
-                    )
-                    write_time = time.time() - write_start
-                    print_flush(f"[STEP 13] Video file written successfully with CPU fallback in {write_time:.2f}s")
-                except Exception as e2:
-                    print_flush(f"[STEP 13][ERROR] CPU fallback also failed: {e2}")
-                    print_flush(f"[STEP 13][ERROR] CPU fallback error type: {type(e2).__name__}")
-                    
-                    # Try with minimal parameters as last resort
-                    try:
-                        print_flush(f"[STEP 13] Retrying with minimal parameters...")
-                        minimal_params = {
-                            'fps': self.fps,
-                            'codec': 'libx264',
-                            'audio_codec': 'aac',
-                            'preset': 'ultrafast',
-                            'verbose': False,
-                            'logger': None
-                        }
-                        print_flush(f"[STEP 13] Minimal parameters: {minimal_params}")
-                        final_video.write_videofile(
-                            output_file,
-                            **minimal_params
-                        )
-                        write_time = time.time() - write_start
-                        print_flush(f"[STEP 13] Video file written successfully with minimal parameters in {write_time:.2f}s")
-                    except Exception as e2:
-                        print_flush(f"[STEP 13][ERROR] Minimal parameters also failed: {e2}")
-                        print_flush(f"[STEP 13][ERROR] Minimal parameters error type: {type(e2).__name__}")
-                        raise e2
+                print_flush(f"[STEP 13] Video written with GPU acceleration in {write_time:.2f}s")
+            else:
+                # Fallback to CPU encoding
+                print_flush("[STEP 13] Using CPU fallback encoding...")
+                write_start = time.time()
+                final_video.write_videofile(
+                    output_file,
+                    fps=self.fps,
+                    codec='libx264',
+                    audio_codec='aac',
+                    preset='ultrafast',
+                    threads=8,
+                    verbose=False,
+                    logger=None
+                )
+                write_time = time.time() - write_start
+                print_flush(f"[STEP 13] Video written with CPU encoding in {write_time:.2f}s")
             
-            update_progress("Cleaning up resources")
-            print_flush("[STEP 14] Cleaning up resources...")
-            cleanup_start = time.time()
+            # Check GPU performance after encoding
+            gpu_stats_after = check_gpu_performance()
+            print_flush(f"[STEP 13] GPU Status after encoding: {gpu_stats_after}")
+            
+            print_flush(f"[STEP 13] Memory usage after write: {psutil.virtual_memory().percent}%")
+            print_flush(f"[STEP 13] Video generation completed successfully!")
+            
+            # Clean up
             final_video.close()
             audio_clip.close()
             for clip in video_clips:
                 clip.close()
-            cleanup_time = time.time() - cleanup_start
-            print_flush(f"[STEP 14] Cleanup completed in {cleanup_time:.2f}s")
             
-            # Force garbage collection
-            gc.collect()
-            print_flush(f"[STEP 14] Memory usage after cleanup: {psutil.virtual_memory().percent}%")
-            
-            # Mark as completed
-            video_generation_progress['is_running'] = False
-            update_progress("Completed")
-            
-            total_time = time.time() - start_time
-            print_flush(f"[VIDEO GEN COMPLETE] Video generated successfully in {total_time:.2f}s")
-            print_flush(f"[VIDEO GEN COMPLETE] Output file: {output_file}")
-            print_flush(f"[VIDEO GEN COMPLETE] File size: {os.path.getsize(output_file) / (1024*1024):.2f} MB")
-            
-            return output_file
+            return True
             
         except Exception as e:
-            # Mark as failed
-            video_generation_progress['is_running'] = False
-            update_progress("Failed")
-            
-            total_time = time.time() - start_time
-            print_flush(f"[VIDEO GEN ERROR] Failed after {total_time:.2f}s: {e}")
-            print_flush(f"[VIDEO GEN ERROR] Memory usage: {psutil.virtual_memory().percent}%")
-            raise
+            print_flush(f"[ERROR] Video generation failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
     
     def _wrap_text(self, text, font, max_width, draw):
         # Splits text into lines so that each line fits within max_width
@@ -1683,73 +1630,188 @@ class VideoGenerator:
         return lines
 
     def _correct_ideogram_colors(self, img):
-        """Correct color balance for Ideogram images to fix tinting issues"""
-        try:
-            # Convert to RGB if needed
+        """Apply color correction to Ideogram images to fix tinting issues"""
+        # Handle both PIL Image and numpy array inputs
+        if hasattr(img, 'mode'):
+            # PIL Image
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            
-            # Convert to numpy array for color analysis
-            import numpy as np
             img_array = np.array(img)
-            
-            # Calculate channel averages
-            red_channel = img_array[:, :, 0].mean()
-            green_channel = img_array[:, :, 1].mean()
-            blue_channel = img_array[:, :, 2].mean()
-            
-            # Check if color correction is needed (if blue channel is significantly higher)
-            channel_diff = max(red_channel, green_channel, blue_channel) - min(red_channel, green_channel, blue_channel)
-            
-            if channel_diff > 15:  # Significant color imbalance detected
-                print_flush(f"[COLOR CORRECTION] Applying color correction to Ideogram image")
-                print_flush(f"[COLOR CORRECTION] Before - R:{red_channel:.1f} G:{green_channel:.1f} B:{blue_channel:.1f}")
-                
-                # Apply color correction to reduce blue tint
-                # Increase red and green channels slightly, reduce blue channel
-                correction_factor = 1.1  # Increase red and green by 10%
-                blue_reduction = 0.9     # Reduce blue by 10%
-                
-                # Apply correction
-                img_array[:, :, 0] = np.clip(img_array[:, :, 0] * correction_factor, 0, 255)  # Red
-                img_array[:, :, 1] = np.clip(img_array[:, :, 1] * correction_factor, 0, 255)  # Green
-                img_array[:, :, 2] = np.clip(img_array[:, :, 2] * blue_reduction, 0, 255)     # Blue
-                
-                # Convert back to PIL Image
-                corrected_img = Image.fromarray(img_array.astype(np.uint8))
-                
-                # Verify correction
-                corrected_array = np.array(corrected_img)
-                new_red = corrected_array[:, :, 0].mean()
-                new_green = corrected_array[:, :, 1].mean()
-                new_blue = corrected_array[:, :, 2].mean()
-                print_flush(f"[COLOR CORRECTION] After - R:{new_red:.1f} G:{new_green:.1f} B:{new_blue:.1f}")
-                
-                return corrected_img
-            else:
-                print_flush(f"[COLOR CORRECTION] No correction needed - colors are balanced")
-                return img
-                
-        except Exception as e:
-            print_flush(f"[COLOR CORRECTION] Error applying color correction: {e}")
-            return img
+        else:
+            # Numpy array
+            img_array = img
+        
+        # Apply color correction (increase R/G, reduce B to fix blue tint)
+        corrected = img_array.copy()
+        corrected[:, :, 0] = np.clip(corrected[:, :, 0] * 1.1, 0, 255)  # Increase red
+        corrected[:, :, 1] = np.clip(corrected[:, :, 1] * 1.1, 0, 255)  # Increase green
+        corrected[:, :, 2] = np.clip(corrected[:, :, 2] * 0.9, 0, 255)  # Decrease blue
+        
+        # Only log color correction details in debug mode
+        if self.debug_mode:
+            avg_before = np.mean(img_array, axis=(0, 1))
+            avg_after = np.mean(corrected, axis=(0, 1))
+            print_flush(f"[COLOR CORRECTION] Before - R:{avg_before[0]:.1f} G:{avg_before[1]:.1f} B:{avg_before[2]:.1f}")
+            print_flush(f"[COLOR CORRECTION] After - R:{avg_after[0]:.1f} G:{avg_after[1]:.1f} B:{avg_after[2]:.1f}")
+        
+        return corrected
 
     def _center_crop_cover(self, img, target_width, target_height):
         # Scale and crop the image to fill the target size (center crop, no squeeze)
-        img_ratio = img.width / img.height
-        target_ratio = target_width / target_height
-        if img_ratio > target_ratio:
-            # Image is wider than target: crop left/right
-            new_height = target_height
-            new_width = int(target_height * img_ratio)
+        # Handle both PIL Image and numpy array inputs
+        if hasattr(img, 'width'):
+            # PIL Image
+            img_ratio = img.width / img.height
         else:
-            # Image is taller than target: crop top/bottom
-            new_width = target_width
-            new_height = int(target_width / img_ratio)
-        img = img.resize((new_width, new_height), Image.LANCZOS)
-        left = (new_width - target_width) // 2
-        top = (new_height - target_height) // 2
-        right = left + target_width
-        bottom = top + target_height
-        img = img.crop((left, top, right, bottom))
-        return img 
+            # Numpy array
+            img_ratio = img.shape[1] / img.shape[0]
+            # Convert to PIL Image for processing
+            img = Image.fromarray(img)
+        
+        target_ratio = target_width / target_height
+        
+        if img_ratio > target_ratio:
+            # Image is wider than target, crop width
+            new_width = int(img.height * target_ratio)
+            new_height = img.height
+            left = (img.width - new_width) // 2
+            top = 0
+            right = left + new_width
+            bottom = new_height
+        else:
+            # Image is taller than target, crop height
+            new_width = img.width
+            new_height = int(img.width / target_ratio)
+            left = 0
+            top = (img.height - new_height) // 2
+            right = new_width
+            bottom = top + new_height
+        
+        cropped = img.crop((left, top, right, bottom))
+        return cropped.resize((target_width, target_height), Image.Resampling.LANCZOS)
+
+    def _gpu_resize_image(self, img, target_size):
+        """GPU-accelerated image resizing"""
+        if not self.gpu_image_processing:
+            return img.resize(target_size, Image.LANCZOS)
+        
+        try:
+            # Convert PIL to OpenCV format
+            if img.mode == 'RGBA':
+                img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+            else:
+                img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            
+            # Upload to GPU
+            gpu_img = cuda.GpuMat()
+            gpu_img.upload(img_cv)
+            
+            # GPU resize
+            gpu_resized = cuda.resize(gpu_img, target_size)
+            
+            # Download from GPU
+            resized_cv = gpu_resized.download()
+            
+            # Convert back to PIL
+            if img.mode == 'RGBA':
+                resized_pil = Image.fromarray(cv2.cvtColor(resized_cv, cv2.COLOR_BGR2RGBA))
+            else:
+                resized_pil = Image.fromarray(cv2.cvtColor(resized_cv, cv2.COLOR_BGR2RGB))
+            
+            return resized_pil
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"[GPU] GPU resize failed, falling back to CPU: {e}")
+            return img.resize(target_size, Image.LANCZOS)
+    
+    def _gpu_color_correction(self, img):
+        """GPU-accelerated color correction"""
+        if not self.gpu_image_processing:
+            return self._correct_ideogram_colors(img)
+        
+        try:
+            # Convert PIL to OpenCV format
+            if img.mode == 'RGBA':
+                img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+            else:
+                img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            
+            # Upload to GPU
+            gpu_img = cuda.GpuMat()
+            gpu_img.upload(img_cv)
+            
+            # GPU color correction (increase red/green, reduce blue)
+            # Create color correction matrix
+            correction_matrix = np.array([
+                [1.1, 0, 0],    # Increase red by 10%
+                [0, 1.1, 0],    # Increase green by 10%
+                [0, 0, 0.9]     # Reduce blue by 10%
+            ], dtype=np.float32)
+            
+            # Apply color correction on GPU
+            gpu_corrected = cuda.transform(gpu_img, correction_matrix)
+            
+            # Download from GPU
+            corrected_cv = gpu_corrected.download()
+            
+            # Convert back to PIL
+            if img.mode == 'RGBA':
+                corrected_pil = Image.fromarray(cv2.cvtColor(corrected_cv, cv2.COLOR_BGR2RGBA))
+            else:
+                corrected_pil = Image.fromarray(cv2.cvtColor(corrected_cv, cv2.COLOR_BGR2RGB))
+            
+            return corrected_pil
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"[GPU] GPU color correction failed, falling back to CPU: {e}")
+            return self._correct_ideogram_colors(img)
+    
+    def _gpu_blend_images(self, background, overlay, alpha=0.8):
+        """GPU-accelerated image blending"""
+        if not self.gpu_image_processing:
+            # Fallback to PIL blending
+            if background.mode != overlay.mode:
+                overlay = overlay.convert(background.mode)
+            return Image.blend(background, overlay, alpha)
+        
+        try:
+            # Convert both images to OpenCV format
+            if background.mode == 'RGBA':
+                bg_cv = cv2.cvtColor(np.array(background), cv2.COLOR_RGBA2BGR)
+            else:
+                bg_cv = cv2.cvtColor(np.array(background), cv2.COLOR_RGB2BGR)
+            
+            if overlay.mode == 'RGBA':
+                ov_cv = cv2.cvtColor(np.array(overlay), cv2.COLOR_RGBA2BGR)
+            else:
+                ov_cv = cv2.cvtColor(np.array(overlay), cv2.COLOR_RGB2BGR)
+            
+            # Upload to GPU
+            gpu_bg = cuda.GpuMat()
+            gpu_ov = cuda.GpuMat()
+            gpu_bg.upload(bg_cv)
+            gpu_ov.upload(ov_cv)
+            
+            # GPU blending
+            gpu_blended = cuda.addWeighted(gpu_bg, 1-alpha, gpu_ov, alpha, 0)
+            
+            # Download from GPU
+            blended_cv = gpu_blended.download()
+            
+            # Convert back to PIL
+            if background.mode == 'RGBA':
+                blended_pil = Image.fromarray(cv2.cvtColor(blended_cv, cv2.COLOR_BGR2RGBA))
+            else:
+                blended_pil = Image.fromarray(cv2.cvtColor(blended_cv, cv2.COLOR_BGR2RGB))
+            
+            return blended_pil
+            
+        except Exception as e:
+            if self.debug_mode:
+                print(f"[GPU] GPU blending failed, falling back to CPU: {e}")
+            # Fallback to PIL blending
+            if background.mode != overlay.mode:
+                overlay = overlay.convert(background.mode)
+            return Image.blend(background, overlay, alpha)
