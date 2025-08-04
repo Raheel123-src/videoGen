@@ -1,4 +1,3 @@
-Flask>=2.0.0
 requests>=2.25.0
 pydub>=0.25.1
 openai>=1.0.0
@@ -13,4 +12,5 @@ boto3>=1.34.0
 modal>=1.0.0
 psutil>=5.9.0
 botocore>=1.34.0
-# supabase>=2.0.0  # Removed - using container concurrency for session management
+opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0
