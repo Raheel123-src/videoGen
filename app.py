@@ -9,6 +9,7 @@ from datetime import timedelta
 from dotenv import load_dotenv
 from openai import OpenAI
 from video_generator import VideoGenerator
+from video_generator_portrait import VideoGeneratorPortrait
 import glob
 import random
 
@@ -202,24 +203,37 @@ def clean_json_block(raw):
         raw = raw.rstrip('`')
     return raw.strip()
 
-def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None):
+def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, orientation='landscape'):
     """Generate slide JSON for a segment using GPT-4o. Strict JSON output, with fix logic if needed."""
     client = get_openai_client()
+    
+    # Determine format range based on orientation
+    if orientation == 'portrait':
+        format_range = "6-7"
+        format_rule = "You MUST randomly select a format number between 6-7 for each slide"
+        format_examples = "formats 6, 7 should all be used throughout the presentation"
+        image_requirement = "image_prompt (string, required for all formats 6 or 7; do NOT include the word 'ideogram')"
+    else:
+        format_range = "2-4"
+        format_rule = "You MUST randomly select a format number between 2-4 for each slide"
+        format_examples = "formats 2, 3, 4 should all be used throughout the presentation"
+        image_requirement = "image_prompt (string, required for all formats 2, 3, or 4; do NOT include the word 'ideogram')"
+    
     prompt = f'''
 You are a presentation expert specializing in Indian corporate environments.
 
 Given the following transcript segment and its duration, output a single JSON object for the slide with these fields:
 - slide_number (integer)
-- format (integer, 2-4)
+- format (integer, {format_range})
 - title (string)
 - bullets (array of strings, each may contain <highlight> tags, or empty array if not needed)
-- image_prompt (string, required for all formats 2, 3, or 4; do NOT include the word 'ideogram')
+- {image_requirement}
 
 **CRITICAL FORMAT RULE:**
-- You MUST randomly select a format number between 2-4 for each slide
+- {format_rule}
 - NEVER use the same format as the previous slide (previous_format={previous_format})
 - If previous_format is {previous_format}, choose ANY format except {previous_format}
-- Use random selection to ensure variety: formats 2, 3, 4 should all be used throughout the presentation
+- Use random selection to ensure variety: {format_examples}
 - Do NOT use format 1 or format 5. Do NOT favor any particular format - truly randomize your choice
 
 **INDIAN OFFICE IMAGE REQUIREMENTS:**
@@ -296,12 +310,18 @@ Title: {segment_title or f"Slide {segment_index+1}"}
         if slide_json is None:
             raise Exception(f"Failed to parse/fix JSON for segment {segment_index}. Raw: {raw_json}")
     
-    # 🎯 NEW RULE: If format is 2 or 3 but no bullet points, change to format 4
-    if slide_json.get('format') in [2, 3]:
+    # 🎯 NEW RULE: If format is 2 or 3 but no bullet points, change to format 4 (landscape only)
+    if orientation == 'landscape' and slide_json.get('format') in [2, 3]:
         bullets = slide_json.get('bullets', [])
         if not bullets or len(bullets) < 2:
             print(f"[FORMAT FIX] Slide {segment_index + 1}: Format {slide_json.get('format')} has insufficient bullets ({len(bullets)}), changing to format 4")
             slide_json['format'] = 4
+    # 🎯 NEW RULE: If format is 6 but no bullet points, change to format 7 (portrait only)
+    elif orientation == 'portrait' and slide_json.get('format') == 6:
+        bullets = slide_json.get('bullets', [])
+        if not bullets or len(bullets) < 2:
+            print(f"[FORMAT FIX] Slide {segment_index + 1}: Format {slide_json.get('format')} has insufficient bullets ({len(bullets)}), changing to format 7")
+            slide_json['format'] = 7
     
     return slide_json
 
@@ -321,7 +341,7 @@ def extract_script_bullets(segment_text, max_bullets=5, max_words=6):
             break
     return bullets
 
-def create_segments_file(segments, output_path):
+def create_segments_file(segments, output_path, orientation='landscape'):
     """Create both slides.json and segments.json files"""
     try:
         # Create slides.json
@@ -332,8 +352,8 @@ def create_segments_file(segments, output_path):
             percent = int((i+1)/total_segments*100)
             duration = segment['end'] - segment['start']
             format_type = segment.get('format', None)
-            print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s, Format: {format_type}", flush=True)
-            slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format)
+            print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s, Format: {format_type}, Orientation: {orientation}", flush=True)
+            slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format, orientation=orientation)
             # Overwrite the format in slide_json to match the pre-assigned format
             if format_type is not None:
                 slide_json['format'] = format_type
@@ -656,6 +676,8 @@ def generate_video(filename):
         from flask import request
         show_subtitles = request.args.get('show_subtitles', '1') == '1'
         selected_background = request.args.get('background')
+        orientation = request.args.get('orientation', 'landscape')  # Default to landscape
+        
         # Extract base filename without extension
         base_name = filename.rsplit('_segments.json', 1)[0]
         # Construct file paths
@@ -710,15 +732,25 @@ def generate_video(filename):
             print(f"Warning: Could not run highlight script: {e}")
             # Continue without highlights if script fails
         
-        # Initialize video generator
-        video_gen = VideoGenerator(
-            segments_folder=app.config['SEGMENTS_FOLDER'],
-            transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
-            font_folder='circular-std-font-family'
-        )
+        # Initialize video generator based on orientation
+        if orientation == 'portrait':
+            video_gen = VideoGeneratorPortrait(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"Using portrait video generator for {orientation} orientation")
+        else:
+            video_gen = VideoGenerator(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"Using landscape video generator for {orientation} orientation")
+        
         # Generate video
         output_video = os.path.join(app.config['UPLOAD_FOLDER'], f"{base_name}_video.mp4")
-        print(f"Starting video generation for {filename}...")
+        print(f"Starting video generation for {filename} with {orientation} orientation...")
         video_gen.generate_video(segments_file, word_srt_file, audio_file, output_video, show_subtitles=show_subtitles, selected_background=selected_background)
         flash(f'Video generated successfully: {os.path.basename(output_video)}')
         return redirect('/')
@@ -736,6 +768,7 @@ def process_and_generate_video():
         video_name = request.form.get('video_name', '').strip()
         show_subtitles = request.form.get('show_subtitles', 'true').lower() == 'true'
         selected_background = request.form.get('selected_background', '')
+        orientation = request.form.get('orientation', 'landscape')  # Default to landscape
         
         # Validate inputs
         if not audio_file and not audio_url:
@@ -781,7 +814,7 @@ def process_and_generate_video():
         audio_segments = create_audio_segments(sentence_segments, 15)
         segments_filename = f"{filename.rsplit('.', 1)[0]}_segments.json"
         segments_filepath = os.path.join(app.config['SEGMENTS_FOLDER'], segments_filename)
-        create_segments_file(audio_segments, segments_filepath)
+        create_segments_file(audio_segments, segments_filepath, orientation=orientation)
         
         print(f"[COMBINED API] Audio processing completed")
         
@@ -820,12 +853,21 @@ def process_and_generate_video():
                 bg_files = [f for f in os.listdir('background') if f.lower().endswith(('.jpg', '.png'))]
                 selected_bg = random.choice(bg_files) if bg_files else None
         
-        # Initialize video generator
-        video_gen = VideoGenerator(
-            segments_folder=app.config['SEGMENTS_FOLDER'],
-            transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
-            font_folder='circular-std-font-family'
-        )
+        # Initialize video generator based on orientation
+        if orientation == 'portrait':
+            video_gen = VideoGeneratorPortrait(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"[COMBINED API] Using portrait video generator for {orientation} orientation")
+        else:
+            video_gen = VideoGenerator(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"[COMBINED API] Using landscape video generator for {orientation} orientation")
         
         # Generate video with custom name
         output_video = os.path.join(app.config['UPLOAD_FOLDER'], f"{video_name}.mp4")
@@ -852,6 +894,7 @@ def generate_video_api():
         video_name = data.get('video_name', '').strip()
         show_subtitles = data.get('show_subtitles', True)
         selected_background = data.get('selected_background', '')
+        orientation = data.get('orientation', 'landscape')  # Default to landscape
         
         # Validate video name
         if not video_name:
@@ -944,11 +987,20 @@ def generate_video_api():
             # Continue without highlights if script fails
         
         # Generate video
-        video_gen = VideoGenerator(
-            segments_folder=app.config['SEGMENTS_FOLDER'],
-            transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
-            font_folder='circular-std-font-family'
-        )
+        if orientation == 'portrait':
+            video_gen = VideoGeneratorPortrait(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"[API DEBUG] Using portrait video generator for {orientation} orientation")
+        else:
+            video_gen = VideoGenerator(
+                segments_folder=app.config['SEGMENTS_FOLDER'],
+                transcripts_folder=app.config['TRANSCRIPTS_FOLDER'],
+                font_folder='circular-std-font-family'
+            )
+            print(f"[API DEBUG] Using landscape video generator for {orientation} orientation")
         
         output_video = os.path.join(app.config['UPLOAD_FOLDER'], f"{video_name}.mp4")
         print(f"[API DEBUG] Generating video with custom name: {video_name}")

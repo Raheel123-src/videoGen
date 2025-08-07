@@ -113,6 +113,10 @@ def process_slide_parallel(slide, session_id=None):
         aspect_ratio = "1x1"  # Square for formats 2 and 3
     elif format_type == 4:
         aspect_ratio = "16x9"  # Landscape for format 4
+    elif format_type == 6:
+        aspect_ratio = "9x16"  # Portrait for format 6 (top half image)
+    elif format_type == 7:
+        aspect_ratio = "9x16"  # Portrait for format 7 (full image)
     else:
         print(f"⏭️ Skipping slide {slide_number} (format {format_type}) - no image needed")
         return None

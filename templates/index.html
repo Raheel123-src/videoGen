@@ -373,6 +373,14 @@
                             {% endfor %}
                         </select>
                     </div>
+                    
+                    <div class="control-group">
+                        <label for="orientation">Orientation:</label>
+                        <select id="orientation" name="orientation">
+                            <option value="landscape">Landscape (16:9)</option>
+                            <option value="portrait">Portrait (9:16)</option>
+                        </select>
+                    </div>
                 </div>
             </div>
             
@@ -452,6 +460,7 @@
                 const videoName = document.getElementById('video_name').value.trim();
                 const showSubtitles = document.getElementById('show_subtitles').checked;
                 const selectedBg = document.getElementById('selected_background') ? document.getElementById('selected_background').value : '';
+                const orientation = document.getElementById('orientation') ? document.getElementById('orientation').value : 'landscape';
                 
                 // Validate inputs
                 if (!audioFile && !audioUrl) {
@@ -482,6 +491,7 @@
                 formData.append('video_name', videoName);
                 formData.append('show_subtitles', showSubtitles);
                 formData.append('selected_background', selectedBg);
+                formData.append('orientation', orientation);
                 
                 // Make API call to process audio and generate video
                 fetch('/process_and_generate_video', {

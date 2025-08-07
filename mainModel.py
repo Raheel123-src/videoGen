@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from pydub import AudioSegment
 import json
 from video_generator import VideoGenerator
+from video_generator_portrait import VideoGeneratorPortrait
 import sys
 from urllib.parse import urlparse
 import boto3
@@ -54,6 +55,7 @@ class VideoGenerationRequest(BaseModel):
     has_heygen: Optional[bool] = False
     bgm_volume: Optional[int] = 50
     bgm_crossfade: Optional[int] = 2000
+    orientation: Optional[str] = "landscape"  # New parameter for portrait/landscape selection
 
 # Load environment variables
 load_dotenv()
@@ -675,24 +677,32 @@ Return ONLY the environment prompt, no explanations or additional text.
     return environment_prompt
 
 # Function to generate slide JSON content using GPT-4o
-def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, target_audience=None):
+def generate_slide_json_content(segment_text, segment_index, segment_duration, segment_title=None, previous_format=None, target_audience=None, orientation='landscape'):
     client = get_openai_client()
+    
+    # Determine format range based on orientation
+    if orientation == 'portrait':
+        format_range = "6-7"
+        format_instruction = "You MUST randomly select a format number between 6-7 for each slide"
+    else:
+        format_range = "2-4"
+        format_instruction = "You MUST randomly select a format number between 2-4 for each slide"
     
     prompt = f'''
 You are a presentation expert specializing in creating dynamic, context-aware slides.
 
 Given the following transcript segment and its duration, output a single JSON object for the slide with these fields:
 - slide_number (integer)
-- format (integer, 2-4)
+- format (integer, {format_range})
 - title (string)
 - bullets (array of strings, each may contain <highlight> tags, or empty array if not needed)
-- image_prompt (string, required for all formats 2, 3, or 4; do NOT include the word 'ideogram')
+- image_prompt (string, required for all formats {format_range}; do NOT include the word 'ideogram')
 
 **CRITICAL FORMAT RULE:**
-- You MUST randomly select a format number between 2-4 for each slide
+- {format_instruction}
 - NEVER use the same format as the previous slide (previous_format={previous_format})
 - If previous_format is {previous_format}, choose ANY format except {previous_format}
-- Do NOT use format 1 or format 5. Do NOT favor any particular format - truly randomize your choice
+- Do NOT favor any particular format - truly randomize your choice
 
 **SLIDE-CONTENT-FOCUSED IMAGE GENERATION:**
 
@@ -746,6 +756,7 @@ Transcript:
 Duration: {segment_duration:.2f} seconds
 Title: {segment_title or f"Slide {segment_index+1}"}
 Target Audience: {target_audience or "General professional"}
+Orientation: {orientation}
 
 Create an image prompt that shows exactly what this slide is discussing, with appropriate complexity for the target audience.
 '''
@@ -795,11 +806,18 @@ Create an image prompt that shows exactly what this slide is discussing, with ap
             print(f"[FORMAT FIX] Slide {segment_index + 1}: Format {slide_json.get('format')} has insufficient bullets ({len(bullets)}), changing to format 4")
             slide_json['format'] = 4
     
+    # 🎯 NEW RULE: For portrait mode, if format is 6 but insufficient bullets, change to format 7
+    if orientation == 'portrait' and slide_json.get('format') == 6:
+        bullets = slide_json.get('bullets', [])
+        if not bullets or len(bullets) < 2:
+            print(f"[FORMAT FIX] Slide {segment_index + 1}: Portrait format 6 has insufficient bullets ({len(bullets)}), changing to format 7")
+            slide_json['format'] = 7
+    
     return slide_json
 
 # Function to create slides.json from segments
 
-def create_slides_json_from_segments(segments, slides_json_path, target_audience=None):
+def create_slides_json_from_segments(segments, slides_json_path, target_audience=None, orientation='landscape'):
     """Create slides.json from pre-created segments (with 'format' field)"""
     slides = []
     total_segments = len(segments)
@@ -807,12 +825,13 @@ def create_slides_json_from_segments(segments, slides_json_path, target_audience
     print(f"[DEBUG] Creating {total_segments} slides from segments")
     if target_audience:
         print(f"[DEBUG] Using target audience: {target_audience}")
+    print(f"[DEBUG] Using orientation: {orientation}")
     for i, segment in enumerate(segments):
         percent = int((i+1)/total_segments*100)
         duration = segment['end'] - segment['start']
         format_type = segment.get('format', None)
         print(f"Generating slide JSON for segment {i+1}/{total_segments} ({percent}%) - Duration: {duration:.1f}s, Format: {format_type}", flush=True)
-        slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format, target_audience=target_audience)
+        slide_json = generate_slide_json_content(segment['text'], i, duration, previous_format=previous_format, target_audience=target_audience, orientation=orientation)
         # Overwrite the format in slide_json to match the pre-assigned format
         if format_type is not None:
             slide_json['format'] = format_type
@@ -823,6 +842,13 @@ def create_slides_json_from_segments(segments, slides_json_path, target_audience
                     print(f"[FORMAT FIX] Slide {i + 1}: Pre-assigned format {format_type} has insufficient bullets ({len(bullets)}), changing to format 4")
                     slide_json['format'] = 4
                     format_type = 4  # Update the format for next iteration
+            # 🎯 NEW RULE: For portrait mode, check if format 6 has insufficient bullets and change to format 7
+            elif orientation == 'portrait' and format_type == 6:
+                bullets = slide_json.get('bullets', [])
+                if not bullets or len(bullets) < 2:
+                    print(f"[FORMAT FIX] Slide {i + 1}: Portrait pre-assigned format 6 has insufficient bullets ({len(bullets)}), changing to format 7")
+                    slide_json['format'] = 7
+                    format_type = 7  # Update the format for next iteration
         previous_format = format_type
         slides.append(slide_json)
     print(f"[DEBUG] Created {len(slides)} slides from segments")
@@ -896,11 +922,12 @@ def parse_timestamp_to_seconds(timestamp):
     except:
         return 0.0
 
-def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=None, audio_duration=None):
+def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_path, target_audience=None, audio_duration=None, orientation='landscape'):
     """Create slides.json from corrected SRT content with smart segment logic"""
     print("[DEBUG] Creating slides from corrected SRT content...")
     if target_audience:
         print(f"[DEBUG] Using target audience: {target_audience}")
+    print(f"[DEBUG] Using orientation: {orientation}")
     
     # Parse the corrected SRT back into segments
     corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
@@ -951,7 +978,7 @@ def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_pa
                 # Update the slide content with merged text
                 merged_text = last_slide.get('text', '') + " " + remaining_text.strip()
                 print(f"Generating updated slide JSON for merged segment {segment_index} (extended duration)")
-                updated_slide_json = generate_slide_json_content(merged_text.strip(), segment_index-1, total_duration - last_slide.get('start_time', segment_start-15), previous_format=previous_format, target_audience=target_audience)
+                updated_slide_json = generate_slide_json_content(merged_text.strip(), segment_index-1, total_duration - last_slide.get('start_time', segment_start-15), previous_format=previous_format, target_audience=target_audience, orientation=orientation)
                 
                 # Update the last slide with new content
                 slides[-1] = updated_slide_json
@@ -970,7 +997,7 @@ def create_slides_json_from_corrected_srt(corrected_sentence_srt, slides_json_pa
         
         if segment_text.strip():
             print(f"Generating slide JSON for corrected segment {segment_index+1} ({segment_start:.1f}s - {segment_end:.1f}s)")
-            slide_json = generate_slide_json_content(segment_text.strip(), segment_index, segment_end - segment_start, previous_format=previous_format, target_audience=target_audience)
+            slide_json = generate_slide_json_content(segment_text.strip(), segment_index, segment_end - segment_start, previous_format=previous_format, target_audience=target_audience, orientation=orientation)
             previous_format = slide_json.get('format', previous_format)
             slides.append(slide_json)
             segment_index += 1
@@ -1104,6 +1131,8 @@ def process_slide_parallel(slide, session_id=None):
         aspect_ratio = "1x1"  # Square for formats 2 and 3
     elif format_type == 4:
         aspect_ratio = "16x9"  # Landscape for format 4
+    elif format_type in [6, 7]:
+        aspect_ratio = "9x16"  # Portrait for formats 6 and 7
     else:
         print(f"⏭️ Skipping slide {slide_number} (format {format_type}) - no image needed")
         return None
@@ -1341,6 +1370,7 @@ Word-level SRT:
 
 app = FastAPI()
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -1348,6 +1378,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add a simple root endpoint
+@app.get("/")
+async def root():
+    return {"message": "mainModel API is running", "status": "ok"}
 
 # Simple job status tracking (in-memory dict for now, can be replaced with persistent store)
 job_status = {}
@@ -1454,17 +1489,21 @@ async def process_and_generate_video_json(request: VideoGenerationRequest):
             
             # --- Ensure slides.json is generated ---
             slides_json_path = os.path.join(session_segments, 'slides.json')
+            # Get orientation from request, default to landscape
+            orientation = request.orientation or "landscape"
+            print(f"[JSON API] Using orientation: {orientation}")
+            
             # If SRT correction was run, create slides and segments from corrected SRT
             if request.script:
                 print("[JSON API] Creating slides and segments from GPT-corrected SRT content...")
                 corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
-                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration)
-                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience)
+                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration, orientation)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience, orientation=orientation)
             else:
                 # Use original transcription for slides and segments
                 print("[JSON API] Creating slides and segments from original transcription...")
-                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration)
-                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience)
+                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration, orientation)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience, orientation=orientation)
             
             # Create segments.json for video generation (always use the segments from above)
             segments_filename = f"{base_filename}_segments.json"
@@ -1524,12 +1563,23 @@ async def process_and_generate_video_json(request: VideoGenerationRequest):
             # --- Video Generation ---
             print(f"[JSON API] Starting video generation...")
             try:
-                video_gen = VideoGenerator(
-                    segments_folder=session_segments,
-                    transcripts_folder=session_transcripts,
-                    font_folder='circular-std-font-family',
-                    session_id=session_id
-                )
+                # Choose video generator based on orientation
+                if orientation == 'portrait':
+                    print(f"[JSON API] Using VideoGeneratorPortrait for portrait mode")
+                    video_gen = VideoGeneratorPortrait(
+                        segments_folder=session_segments,
+                        transcripts_folder=session_transcripts,
+                        font_folder='circular-std-font-family',
+                        session_id=session_id
+                    )
+                else:
+                    print(f"[JSON API] Using VideoGenerator for landscape mode")
+                    video_gen = VideoGenerator(
+                        segments_folder=session_segments,
+                        transcripts_folder=session_transcripts,
+                        font_folder='circular-std-font-family',
+                        session_id=session_id
+                    )
                 
                 output_filename = f"{video_name_clean}.mp4"
                 output_filepath = os.path.join(session_uploads, output_filename)
@@ -1626,7 +1676,8 @@ async def process_and_generate_video(
     target_audience: Optional[str] = Form(None),
     has_heygen: Optional[bool] = Form(False),
     bgm_volume: Optional[int] = Form(50),  # BGM volume (1-100)
-    bgm_crossfade: Optional[int] = Form(2000)  # Crossfade duration in milliseconds
+    bgm_crossfade: Optional[int] = Form(2000),  # Crossfade duration in milliseconds
+    orientation: Optional[str] = Form("landscape")  # New parameter for portrait/landscape selection
 ):
     session_id = f"{video_name}_{uuid.uuid4().hex[:8]}"
     job_status[session_id] = {"status": "pending", "result": None, "error": None}
@@ -1719,17 +1770,21 @@ async def process_and_generate_video(
             
             # --- Ensure slides.json is generated ---
             slides_json_path = os.path.join(session_segments, 'slides.json')
+            # Get orientation from request, default to landscape
+            orientation = orientation or "landscape"
+            print(f"[COMBINED API] Using orientation: {orientation}")
+            
             # If SRT correction was run, create slides and segments from corrected SRT
             if script:
                 print("[DEBUG] Creating slides and segments from GPT-corrected SRT content...")
                 corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
-                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration)
-                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
+                audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration, orientation)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience, orientation=orientation)
             else:
                 # Use original transcription for slides and segments
                 print("[DEBUG] Creating slides and segments from original transcription...")
-                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration)
-                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience)
+                audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration, orientation)
+                create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=target_audience, orientation=orientation)
             # Create segments.json for video generation (always use the segments from above)
             segments_filename = f"{base_filename}_segments.json"
             segments_filepath = os.path.join(session_segments, segments_filename)
@@ -1792,12 +1847,23 @@ async def process_and_generate_video(
             selected_bg = '1.jpg'
             
             print(f"[COMBINED API] Initializing VideoGenerator...")
-            video_gen = VideoGenerator(
-                segments_folder=session_segments,
-                transcripts_folder=session_transcripts,
-                font_folder='circular-std-font-family',
-                session_id=session_id
-            )
+            # Choose video generator based on orientation
+            if orientation == 'portrait':
+                print(f"[COMBINED API] Using VideoGeneratorPortrait for portrait mode")
+                video_gen = VideoGeneratorPortrait(
+                    segments_folder=session_segments,
+                    transcripts_folder=session_transcripts,
+                    font_folder='circular-std-font-family',
+                    session_id=session_id
+                )
+            else:
+                print(f"[COMBINED API] Using VideoGenerator for landscape mode")
+                video_gen = VideoGenerator(
+                    segments_folder=session_segments,
+                    transcripts_folder=session_transcripts,
+                    font_folder='circular-std-font-family',
+                    session_id=session_id
+                )
             
             output_video = os.path.join(session_uploads, f"{video_name_clean}.mp4")
             print(f"[COMBINED API] Output video path: {output_video}")
@@ -2408,11 +2474,11 @@ def create_session_directories(session_id: str):
     
     return session_uploads, session_transcripts, session_segments, session_images
 
-def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, audio_duration=None):
+def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, audio_duration=None, orientation='landscape'):
     """
     Segment transcript into variable-length segments based on assigned format:
-    - Format 4: 5-8 seconds
-    - Format 2 or 3: 10-20 seconds (based on word count/complexity)
+    - Landscape: Format 4: 5-8 seconds, Format 2 or 3: 10-20 seconds
+    - Portrait: Format 6: 15-20 seconds, Format 7: 5-8 seconds
     Ensures no consecutive formats are the same.
     Returns a list of dicts: {start, end, text, format}
     
@@ -2420,6 +2486,7 @@ def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, 
         sentence_segments: List of transcription segments
         srt_file_path: Optional path to SRT file to get content for slide generation
         audio_duration: Optional actual audio duration from words (takes precedence over SRT duration)
+        orientation: 'landscape' or 'portrait' to determine format range
     """
     if not sentence_segments:
         return []
@@ -2440,17 +2507,33 @@ def segment_transcript_variable_duration(sentence_segments, srt_file_path=None, 
     segment_start = 0
     previous_format = None
     i = 0
-    while segment_start < total_duration:
-        # Assign format (2, 3, or 4), not repeating previous
+    
+    # Determine format range based on orientation
+    if orientation == 'portrait':
+        possible_formats = [6, 7]
+        print(f"[DEBUG] Using portrait formats: {possible_formats}")
+    else:
         possible_formats = [2, 3, 4]
-        if previous_format in possible_formats:
-            possible_formats.remove(previous_format)
-        format_type = random.choice(possible_formats)
+        print(f"[DEBUG] Using landscape formats: {possible_formats}")
+    
+    while segment_start < total_duration:
+        # Assign format based on orientation, not repeating previous
+        available_formats = [f for f in possible_formats if f != previous_format]
+        if not available_formats:
+            available_formats = possible_formats
+        format_type = random.choice(available_formats)
+        
         # Pick duration range based on format
-        if format_type == 4:
-            min_dur, max_dur = 5, 8
-        else:
-            min_dur, max_dur = 10, 20
+        if orientation == 'portrait':
+            if format_type == 6:
+                min_dur, max_dur = 15, 20  # Format 6: 15-20 seconds (content-heavy)
+            else:  # format_type == 7
+                min_dur, max_dur = 5, 8    # Format 7: 5-8 seconds (image-focused)
+        else:  # landscape
+            if format_type == 4:
+                min_dur, max_dur = 5, 8
+            else:  # format_type in [2, 3]
+                min_dur, max_dur = 10, 20
         # Try to pick a segment that fits the duration and ends at a sentence boundary
         segment_end = min(segment_start + max_dur, total_duration)
         # Find the last sentence that ends before or at segment_end, but after min_dur
@@ -2526,3 +2609,11 @@ def get_srt_duration(srt_file_path):
     except Exception as e:
         print(f"[ERROR] Failed to read SRT file {srt_file_path}: {e}")
         return 0
+
+# Add server startup code
+if __name__ == "__main__":
+    import uvicorn
+    print("🚀 Starting mainModel API server...")
+    print("📡 Server will be available at: http://localhost:8000")
+    print("📚 API Documentation: http://localhost:8000/docs")
+    uvicorn.run(app, host="0.0.0.0", port=8000)

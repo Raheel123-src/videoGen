@@ -563,9 +563,9 @@ def get_video_generation_status():
         'last_update': video_generation_progress['last_update']
     }
 
-class VideoGenerator:
+class VideoGeneratorPortrait:
     def __init__(self, segments_folder, transcripts_folder, font_folder, session_id=None):
-        """Initialize VideoGenerator with GPU acceleration support"""
+        """Initialize VideoGeneratorPortrait with GPU acceleration support - EXACT SAME LOGIC AS LANDSCAPE"""
         self.segments_folder = segments_folder
         self.transcripts_folder = transcripts_folder
         self.font_folder = font_folder
@@ -574,9 +574,9 @@ class VideoGenerator:
         # Debug mode for logging
         self.debug_mode = False  # Disable debug logging for better performance
         
-        # Video dimensions
-        self.width = 1920
-        self.height = 1080
+        # Portrait dimensions (9:16 aspect ratio)
+        self.width = 1080
+        self.height = 1920
         self.fps = 30  # Add missing fps attribute
         
         # Colors
@@ -601,22 +601,12 @@ class VideoGenerator:
         
         # Load word segments for subtitle generation
         self.word_segments = []
-    
+
     def _detect_hindi_script(self, text):
-        """Detect if text contains Hindi Devanagari characters"""
+        """Detect if text contains Hindi characters"""
         hindi_chars = set('अआइईउऊएऐओऔकखगघङचछजझञटठडढणतथदधनपफबभमयरलवशषसहक्षत्रज्ञड़ढ़')
         return any(char in hindi_chars for char in text)
-    
-    def _load_fonts(self):
-        # Load fonts with Hindi support
-        self.title_font = self._get_font_for_language("", 72)
-        self.body_font = self._get_font_for_language("", 36)
-        self.subtitle_font = self._get_font_for_language("", 48)
-        self.subtitle_overlay_font = self._get_font_for_language("", 42)
-        
-        if self.debug_mode:
-            print_flush(f"[FONT DEBUG] Loaded fonts - Title: {self.title_font}, Body: {self.body_font}")
-    
+
     def _get_font_for_language(self, text, font_size=48):
         """Detect language and return appropriate font with similar style"""
         # Hindi character detection
@@ -646,112 +636,69 @@ class VideoGenerator:
         else:
             # Use existing CircularStd for Latin scripts
             return ImageFont.truetype(os.path.join(self.font_folder, 'CircularStd-Book.ttf'), font_size)
-    
+
+    def _load_fonts(self):
+        # Load fonts with Hindi support
+        self.title_font = self._get_font_for_language("", 72)
+        self.body_font = self._get_font_for_language("", 36)
+        self.subtitle_font = self._get_font_for_language("", 48)
+        self.subtitle_overlay_font = self._get_font_for_language("", 42)
+        
+        if self.debug_mode:
+            print_flush(f"[FONT DEBUG] Loaded fonts - Title: {self.title_font}, Body: {self.body_font}")
+
     def load_segments_data(self, segments_file):
         """Load segments data from JSON file"""
         with open(segments_file, 'r', encoding='utf-8') as f:
             return json.load(f)
-    
+
     def load_word_segments(self, word_srt_file):
-        """Load word-level timing from SRT file"""
+        """Load word-level segments from SRT file"""
         word_segments = []
         with open(word_srt_file, 'r', encoding='utf-8') as f:
             content = f.read()
-            blocks = content.strip().split('\n\n')
-            
-            for block in blocks:
-                lines = block.strip().split('\n')
-                if len(lines) >= 3:
-                    # Parse timing
-                    timing = lines[1]
-                    start_time, end_time = self.parse_srt_time(timing)
-                    
-                    # Parse text
-                    text = ' '.join(lines[2:]).strip()
-                    word_segments.append({
-                        'start': start_time,
-                        'end': end_time,
-                        'text': text
-                    })
+        
+        # Parse SRT format
+        blocks = content.strip().split('\n\n')
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) >= 3:
+                timing = lines[1]
+                text = ' '.join(lines[2:])
+                
+                # Parse timing
+                start_time, end_time = self.parse_srt_time(timing)
+                
+                word_segments.append({
+                    'start': start_time,
+                    'end': end_time,
+                    'text': text.strip()
+                })
         
         return word_segments
-    
+
     def parse_srt_time(self, timing_str):
-        """Parse SRT time format (HH:MM:SS,mmm) to seconds"""
-        time_parts = timing_str.split(' --> ')
-        start_str = time_parts[0]
-        end_str = time_parts[1]
-        
+        """Parse SRT timing format (HH:MM:SS,mmm)"""
         def time_to_seconds(time_str):
-            time_parts = time_str.replace(',', '.').split(':')
-            hours = int(time_parts[0])
-            minutes = int(time_parts[1])
-            seconds = float(time_parts[2])
-            return hours * 3600 + minutes * 60 + seconds
+            hours, minutes, seconds = time_str.split(':')
+            seconds, milliseconds = seconds.split(',')
+            return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(milliseconds) / 1000
         
+        start_str, end_str = timing_str.split(' --> ')
         return time_to_seconds(start_str), time_to_seconds(end_str)
-    
-    def parse_markdown_content(self, markdown_content):
-        """Parse the markdown section for format, title, bullets, and image prompt. Returns clean bullets and highlight info."""
-        import re
-        elements = []
-        lines = markdown_content.split('\n')
-        title = None
-        bullets = []
-        highlights = []
-        in_bullets = False
-        format_type = None
-        image_prompt = None
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith('**Format**:'):
-                try:
-                    format_type = int(line.replace('**Format**:', '').strip())
-                except:
-                    format_type = None
-                elements.append({'type': 'format', 'value': format_type})
-            elif line.startswith('**Title**:'):
-                title = line.replace('**Title**:', '').strip()
-                elements.append({'type': 'title', 'text': title})
-            elif line.startswith('**Slide Bullets**:'):
-                in_bullets = True
-            elif in_bullets and line.startswith('- '):
-                bullet_text = line[2:].strip()
-                # Extract highlight word and remove tags
-                m = re.search(r'<highlight>(.+?)</highlight>', bullet_text)
-                if m:
-                    highlight_word = m.group(1)
-                    clean_bullet = re.sub(r'<highlight>(.+?)</highlight>', highlight_word, bullet_text)
-                    highlights.append(highlight_word)
-                else:
-                    clean_bullet = bullet_text
-                    highlights.append(None)
-                bullets.append(clean_bullet)
-                elements.append({'type': 'bullet', 'text': clean_bullet, 'highlight': highlight_word if m else None})
-            elif in_bullets and not line.startswith('- '):
-                in_bullets = False
-            elif line.startswith('**Image**:'):
-                image_prompt = line.replace('**Image**:', '').strip()
-                elements.append({'type': 'image', 'prompt': image_prompt})
-        # For convenience, return a dict for slide content
-        return {
-            'format': format_type,
-            'title': title,
-            'bullets': bullets,
-            'highlights': highlights,
-            'image_prompt': image_prompt
-        }
 
     def _draw_subtitle(self, img, subtitle_text):
+        """Draw subtitle text on the image"""
         if not subtitle_text:
             return
+        
         draw = ImageDraw.Draw(img, 'RGBA')
         margin = 60
         max_width = self.width - 2 * margin
+        
         # Get appropriate font for the text (supports Hindi)
         font = self._get_font_for_language(subtitle_text, 42)
+        
         # Wrap subtitle if needed
         words = subtitle_text.split()
         lines = []
@@ -768,6 +715,7 @@ class VideoGenerator:
                 current_line = word
         if current_line:
             lines.append(current_line)
+        
         # Draw background rectangle
         total_height = len(lines) * (font.size + 8) - 8
         y = self.height - margin - total_height
@@ -777,6 +725,7 @@ class VideoGenerator:
         rect_h = total_height + 20
         rect_y = y - 10
         draw.rounded_rectangle([x, rect_y, x+rect_w, rect_y+rect_h], radius=18, fill=(255,255,255,180))
+        
         # Draw lines on top
         y_line = y
         for line in lines:
@@ -786,8 +735,58 @@ class VideoGenerator:
             draw.text((x_line, y_line), line, fill=(0,0,0), font=font)
             y_line += font.size + 8
 
+    def _wrap_text(self, text, font, max_width, draw):
+        """Wrap text to fit within max_width"""
+        words = text.split()
+        lines = []
+        current_line = []
+        
+        for word in words:
+            test_line = ' '.join(current_line + [word])
+            bbox = draw.textbbox((0, 0), test_line, font=font)
+            text_width = bbox[2] - bbox[0]
+            
+            if text_width <= max_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                    current_line = [word]
+                else:
+                    # Single word is too long, force it
+                    lines.append(word)
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
+
+    def _center_crop_cover(self, img, target_width, target_height):
+        """Scale and crop image to fill target size"""
+        if isinstance(img, np.ndarray):
+            img = Image.fromarray(img)
+        
+        # Calculate aspect ratios
+        img_aspect = img.width / img.height
+        target_aspect = target_width / target_height
+        
+        if img_aspect > target_aspect:
+            # Image is wider, crop width
+            new_width = int(img.height * target_aspect)
+            left = (img.width - new_width) // 2
+            img = img.crop((left, 0, left + new_width, img.height))
+        else:
+            # Image is taller, crop height
+            new_height = int(img.width / target_aspect)
+            top = (img.height - new_height) // 2
+            img = img.crop((0, top, img.width, top + new_height))
+        
+        # Resize to target size
+        img = img.resize((target_width, target_height), Image.LANCZOS)
+        return img 
+
     def create_slide_image(self, slide_dict, current_time, segment_start_time, slide_bullet_offset=0, background_img=None, subtitle_text=None, reveal_state=None, segment_duration=None, cached_ideogram_img=None):
-        """Render slide from slide_dict (JSON) according to format, with typewriter and highlight animation."""
+        """Render slide from slide_dict (JSON) according to format, with typewriter and highlight animation - EXACT SAME LOGIC AS LANDSCAPE"""
         format_type = slide_dict.get('format', 1)
         title = slide_dict.get('title', None)
         bullets = slide_dict.get('bullets', [])
@@ -845,12 +844,12 @@ class VideoGenerator:
                     if self.debug_mode:
                         print_flush(f"[IMAGE] No image found for slide {slide_number}, format {format_type}")
         
-        # Format 1: Heading + Bullets (text-only)
+        # Format 1: Heading + Bullets (text-only) - ADAPTED FOR PORTRAIT
         if format_type == 1:
             draw = ImageDraw.Draw(img)
             x0 = 80
             y0 = 120
-            max_text_width = self.width//2 - 2*x0
+            max_text_width = self.width - 2*x0
             if title:
                 # Get appropriate font for title (supports Hindi)
                 title_font = self._get_font_for_language(title, 72)
@@ -894,8 +893,9 @@ class VideoGenerator:
                     y0 += bullet_font.size + 10
             self._draw_subtitle(img, subtitle_text)
             return img
-        # Format 2: Left text, right image (overlay image on right half, background is full slide)
-        elif format_type == 2:
+        
+        # Format 6: Top half image, bottom half text (PORTRAIT ADAPTATION)
+        elif format_type == 6:
             if sample_img is not None:
                 import math, random
                 # Use the true segment duration for Ken Burns
@@ -910,7 +910,7 @@ class VideoGenerator:
                 ]
                 effect = random.choice(effect_types)
                 progress = t / max(duration, 0.01)
-                base_w, base_h = self.width//2, self.height
+                base_w, base_h = self.width, self.height // 2  # Top half only
                 # Always start with a larger crop for movement, guarantee full coverage
                 crop_scale_start = 1.18
                 crop_scale_end = 1.0
@@ -963,11 +963,11 @@ class VideoGenerator:
                         dx = max_dx // 2
                         dy = max_dy // 2
                     sample_img_cropped = img_crop.crop((dx, dy, dx + base_w, dy + base_h))
-                img.paste(sample_img_cropped, (self.width//2, 0))
+                img.paste(sample_img_cropped, (0, 0))  # Paste in top half
             draw = ImageDraw.Draw(img, 'RGBA')
-            x0 = 90  # Move title and bullets slightly more left for format 2
-            y0 = 120
-            max_text_width = self.width//2 - 2*x0
+            x0 = 90  # Move title and bullets slightly more left for format 6
+            y0 = self.height // 2 + 120  # Start text in bottom half
+            max_text_width = self.width - 2*x0
             # --- Animation timing logic ---
             title_reveal_duration = 2.0
             bullet_fade_duration = 1.0
@@ -1042,151 +1042,9 @@ class VideoGenerator:
                     y0 += self.body_font.size + 32  # Original spacing between bullet lines
             self._draw_subtitle(img, subtitle_text)
             return img
-        # Format 3: Left image, right text (overlay image on left half, background is full slide)
-        elif format_type == 3:
-            if sample_img is not None:
-                import math, random
-                # Use the true segment duration for Ken Burns
-                duration = segment_duration if segment_duration is not None else 8
-                t = current_time - segment_start_time
-                t = max(0, min(t, duration))
-                random.seed(slide_dict.get('slide_number', 0))
-                effect_types = [
-                    'zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down',
-                    'diag_tl_br', 'diag_tr_bl', 'diag_bl_tr', 'diag_br_tl'
-                ]
-                effect = random.choice(effect_types)
-                progress = t / max(duration, 0.01)
-                base_w, base_h = self.width//2, self.height
-                crop_scale_start = 1.18
-                crop_scale_end = 1.0
-                if effect == 'zoom_in':
-                    scale = crop_scale_start - (crop_scale_start - crop_scale_end) * progress
-                    crop_w = int(base_w * scale)
-                    crop_h = int(base_h * scale)
-                    img_crop = self._center_crop_cover(sample_img, crop_w, crop_h)
-                    sample_img_cropped = img_crop
-                elif effect == 'zoom_out':
-                    scale = crop_scale_end + (crop_scale_start - crop_scale_end) * progress
-                    crop_w = int(base_w * scale)
-                    crop_h = int(base_h * scale)
-                    img_crop = self._center_crop_cover(sample_img, crop_w, crop_h)
-                    sample_img_cropped = img_crop
-                else:
-                    crop_w = int(base_w * crop_scale_start)
-                    crop_h = int(base_h * crop_scale_start)
-                    img_crop = self._center_crop_cover(sample_img, crop_w, crop_h)
-                    max_dx = crop_w - base_w
-                    max_dy = crop_h - base_h
-                    if effect == 'pan_left':
-                        dx = int(max_dx * progress)
-                        dy = 0
-                    elif effect == 'pan_right':
-                        dx = int(max_dx * (1 - progress))
-                        dy = 0
-                    elif effect == 'pan_up':
-                        dx = 0
-                        dy = int(max_dy * progress)
-                    elif effect == 'pan_down':
-                        dx = 0
-                        dy = int(max_dy * (1 - progress))
-                    elif effect == 'diag_tl_br':
-                        dx = int(max_dx * progress)
-                        dy = int(max_dy * progress)
-                    elif effect == 'diag_tr_bl':
-                        dx = int(max_dx * (1 - progress))
-                        dy = int(max_dy * progress)
-                    elif effect == 'diag_bl_tr':
-                        dx = int(max_dx * progress)
-                        dy = int(max_dy * (1 - progress))
-                    elif effect == 'diag_br_tl':
-                        dx = int(max_dx * (1 - progress))
-                        dy = int(max_dy * (1 - progress))
-                    else:
-                        dx = max_dx // 2
-                        dy = max_dy // 2
-                    sample_img_cropped = img_crop.crop((dx, dy, dx + base_w, dy + base_h))
-                img.paste(sample_img_cropped, (0, 0))
-            draw = ImageDraw.Draw(img, 'RGBA')
-            x0 = self.width//2 + 120  # Keep the same layout
-            y0 = 120
-            max_text_width = self.width//2 - 2*80
-            # --- Animation timing logic (copied from format 2) ---
-            title_reveal_duration = 2.0
-            bullet_fade_duration = 1.0
-            bullet_pause = 1.0
-            highlight_anim_duration = 0.7
-            # Title typewriter effect (0-2s)
-            if title:
-                lines = self._wrap_text(title, self.title_font, max_text_width, draw)
-                total_title_chars = sum(len(line) for line in lines)
-                chars_to_show = int(min(1.0, max(0, (current_time - segment_start_time) / title_reveal_duration)) * total_title_chars)
-                chars_drawn = 0
-                for line in lines:
-                    line_to_draw = line[:max(0, min(len(line), chars_to_show - chars_drawn))]
-                    if self.debug_mode and current_time < 0.1:  # Only log first few frames
-                        print_flush(f"[TITLE DEBUG] Drawing title line: '{line_to_draw}' at position ({x0}, {y0}) with color {self.text_color}")
-                    draw.text((x0, y0), line_to_draw, fill=self.text_color, font=self.title_font)
-                    chars_drawn += len(line)
-                    y0 += self.title_font.size + 10
-                y0 += 120  # Original spacing between title and bullets
-            # Bullets fade in one by one, each over 0.7s, with 1s pause between
-            bullets_start_time = segment_start_time + title_reveal_duration
-            bullet_times = []
-            for i in range(len(bullets)):
-                bullet_times.append(bullets_start_time + i * (bullet_fade_duration + bullet_pause))
-            all_bullets_revealed_time = bullets_start_time + len(bullets) * (bullet_fade_duration + bullet_pause) - bullet_pause
-            for i, bullet in enumerate(bullets):
-                bullet_appear = bullet_times[i]
-                t = current_time - bullet_appear
-                alpha = int(255 * min(1.0, max(0, t / bullet_fade_duration))) if t > 0 else 0
-                if alpha == 0:
-                    y0 += self.body_font.size + 20  # Still increment y0 to keep spacing
-                    continue  # Skip drawing this bullet until its fade-in starts
-                bullet_text = bullet
-                # Parse <highlight> tags in bullet
-                import re
-                m = re.search(r'<highlight>(.+?)</highlight>', bullet_text)
-                if m:
-                    highlight_word = m.group(1)
-                    clean_bullet = re.sub(r'<highlight>(.+?)</highlight>', highlight_word, bullet_text)
-                else:
-                    highlight_word = None
-                    clean_bullet = bullet_text
-                bullet_lines = self._wrap_text(clean_bullet, self.body_font, max_text_width, draw)
-                for line_idx, line in enumerate(bullet_lines):
-                    # Draw bullet dot only for the first line of each bullet point
-                    if alpha > 0 and line_idx == 0:
-                        dot_radius = 7
-                        dot_y = y0 + self.body_font.size//2
-                        draw.ellipse([x0 - 30, dot_y - dot_radius, x0 - 16, dot_y + dot_radius], fill=(0,0,0,alpha))
-                    # Highlight animation logic
-                    highlight_box_alpha = alpha
-                    highlight_box_width = None
-                    if highlight_word and highlight_word in line:
-                        pre, word, post = line.partition(highlight_word)
-                        w_pre = draw.textbbox((0,0), pre, font=self.body_font)[2]
-                        w_word = draw.textbbox((0,0), word, font=self.body_font)[2]
-                        h_word = self.body_font.size + 8
-                        rect_x = x0 + w_pre
-                        rect_y = y0 - 4
-                        # Animate highlight box only after all bullets are revealed
-                        highlight_anim_start = all_bullets_revealed_time
-                        highlight_anim_t = current_time - highlight_anim_start
-                        if highlight_anim_t > 0:
-                            highlight_progress = min(1.0, highlight_anim_t / highlight_anim_duration)
-                            highlight_box_width = int(w_word * highlight_progress)
-                            draw.rounded_rectangle([rect_x, rect_y, rect_x + highlight_box_width, rect_y + h_word], radius=8, fill=(255, 215, 0, int(200*highlight_progress)))
-                        draw.text((x0, y0), pre, fill=(0,0,0,alpha), font=self.body_font)
-                        draw.text((x0 + w_pre, y0), word, fill=(0,0,0,alpha), font=self.body_font)
-                        draw.text((x0 + w_pre + w_word, y0), post, fill=(0,0,0,alpha), font=self.body_font)
-                    else:
-                        draw.text((x0, y0), line, fill=(0,0,0,alpha), font=self.body_font)
-                    y0 += self.body_font.size + 32  # More space between bullet lines for aesthetics
-            self._draw_subtitle(img, subtitle_text)
-            return img
-        # Format 4: Full image only (overlay image on full slide, background is still present but covered)
-        elif format_type == 4:
+        
+        # Format 7: Full image only (PORTRAIT ADAPTATION)
+        elif format_type == 7:
             if sample_img is not None:
                 import math, random
                 # Use the true segment duration for Ken Burns
@@ -1254,7 +1112,8 @@ class VideoGenerator:
                 img.paste(sample_img_cropped, (0, 0))
             self._draw_subtitle(img, subtitle_text)
             return img
-        # Format 5: Heading only, centered
+        
+        # Format 5: Heading only, centered (PORTRAIT ADAPTATION)
         elif format_type == 5:
             draw = ImageDraw.Draw(img)
             if title:
@@ -1266,18 +1125,20 @@ class VideoGenerator:
                 draw.text((x, y), title, fill=self.text_color, font=self.title_font)
             self._draw_subtitle(img, subtitle_text)
             return img
+        
         # Default fallback
         else:
             draw = ImageDraw.Draw(img)
             draw.text((100, 100), f"Slide format {format_type}", fill=self.text_color, font=self.title_font)
             self._draw_subtitle(img, subtitle_text)
             return img
-    
+
     def create_subtitle_text(self, word_segments, current_time):
         """Create subtitle text for current time, showing at most 7 words per segment, refreshing only when a new 7-word segment is reached."""
-        print_flush(f"[DEBUG] create_subtitle_text called with {len(word_segments)} word segments, current_time={current_time}")
-        if word_segments:
-            print_flush(f"[DEBUG] First word segment: {word_segments[0]}")
+        if self.debug_mode:
+            print_flush(f"[DEBUG] create_subtitle_text called with {len(word_segments)} word segments, current_time={current_time}")
+            if word_segments:
+                print_flush(f"[DEBUG] First word segment: {word_segments[0]}")
         # Flatten all words up to current_time
         revealed_words = []
         for word in word_segments:
@@ -1297,9 +1158,9 @@ class VideoGenerator:
         current_segment_words = revealed_words[start_idx:end_idx]
         current_sentence_text = " ".join(current_segment_words)
         return current_sentence_text
-    
+
     def generate_video(self, segments_file, word_srt_file, audio_file, output_file, show_subtitles=True, selected_background=None):
-        """Generate video from segments, SRT, and audio files"""
+        """Generate video from segments, SRT, and audio files - EXACT SAME LOGIC AS LANDSCAPE"""
         try:
             # Check for Hindi script and auto-disable subtitles
             segments_data = self.load_segments_data(segments_file)
@@ -1621,26 +1482,7 @@ class VideoGenerator:
             print_flush(f"[ERROR] Video generation failed: {e}")
             import traceback
             traceback.print_exc()
-            return False
-    
-    def _wrap_text(self, text, font, max_width, draw):
-        # Splits text into lines so that each line fits within max_width
-        words = text.split()
-        lines = []
-        current_line = ''
-        for word in words:
-            test_line = current_line + (' ' if current_line else '') + word
-            bbox = draw.textbbox((0, 0), test_line, font=font)
-            w = bbox[2] - bbox[0]
-            if w <= max_width:
-                current_line = test_line
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
-        if current_line:
-            lines.append(current_line)
-        return lines
+            return False 
 
     def _correct_ideogram_colors(self, img):
         """Apply color correction to Ideogram images to fix tinting issues"""
@@ -1828,3 +1670,5 @@ class VideoGenerator:
             if background.mode != overlay.mode:
                 overlay = overlay.convert(background.mode)
             return Image.blend(background, overlay, alpha)
+
+ 
