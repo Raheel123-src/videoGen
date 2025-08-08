@@ -1178,14 +1178,14 @@ def generate_images_from_slides(slides_json_path='segments/slides.json', session
     total_images = len(slides_with_images)
     
     print(f"🚀 Starting optimized image generation for {total_images} slides")
-    print(f"⚡ Using parallel processing for faster generation")
+    print(f"⚡ Using MAXIMUM parallel processing for faster generation")
     if session_id:
         print(f"📁 Session ID: {session_id}")
     print("=" * 60)
     
     # Use ThreadPoolExecutor for parallel processing
-    # Use up to 10 concurrent requests with GPU T4 for maximum performance
-    max_workers = min(10, total_images)
+    # MAXIMUM CONCURRENCY: Use up to 32 concurrent requests for maximum GPU utilization
+    max_workers = min(32, total_images)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks with session_id
@@ -2201,7 +2201,35 @@ def overlay_heygen_avatars(
                         'empty_space': space['empty_space']
                     })
                 print(f"[COMBINED API] Generating HeyGen videos for {len(slide_segments)} slides...")
-                # --- Concurrent HeyGen API calls ---
+                # --- MAXIMUM CONCURRENT HeyGen API calls ---
+                # Use up to 32 concurrent workers for maximum GPU utilization
+                max_workers = min(32, len(slide_segments))
+                print(f"[COMBINED API] Using {max_workers} concurrent workers for HeyGen processing")
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all HeyGen tasks concurrently
+                    future_to_slide = {
+                        executor.submit(post_and_poll_heygen, slide): slide 
+                        for slide in slide_segments
+                    }
+                    
+                    # Process completed tasks
+                    completed_slides = []
+                    for future in concurrent.futures.as_completed(future_to_slide):
+                        slide = future_to_slide[future]
+                        try:
+                            result = future.result()
+                            if result:
+                                completed_slides.append(result)
+                                print(f"[HEYGEN] ✅ Completed: Slide {slide['slide_number']}")
+                            else:
+                                print(f"[HEYGEN] ❌ Failed: Slide {slide['slide_number']}")
+                        except Exception as e:
+                            print(f"[HEYGEN] ❌ Exception for slide {slide['slide_number']}: {e}")
+                
+                print(f"[COMBINED API] HeyGen processing complete: {len(completed_slides)}/{len(slide_segments)} slides processed")
+                
+                # --- OPTIMIZED HeyGen processing function ---
                 def post_and_poll_heygen(slide):
                     import requests, time
                     slide_number = slide['slide_number']
@@ -2353,14 +2381,6 @@ def overlay_heygen_avatars(
                     print(f"[DEBUG] Overlaying slide {slide_number}: x={x}, y={y}, size={max_side}, start={start_time}, end={end_time}, base=({base_clip.w},{base_clip.h})")
                     overlay_clips.append(heygen_clip_final)
                     return True
-                # Run all HeyGen jobs concurrently
-                with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-                    futures = [executor.submit(post_and_poll_heygen, slide) for slide in slide_segments]
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            future.result()
-                        except Exception as e:
-                            print(f'[COMBINED API] Exception in HeyGen concurrent job: {e}')
     except Exception as e:
         print(f"[COMBINED API] HeyGen overlay generation failed: {e}")
     return overlay_filename 

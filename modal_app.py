@@ -1,6 +1,6 @@
 import modal
 
-# Define the Modal image with all dependencies and requirements
+# Define the Modal image with all necessary dependencies
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install_from_requirements("requirements.txt")
@@ -12,74 +12,98 @@ image = (
         "libsm6", 
         "libxext6", 
         "libxrender-dev"
-        # Removed NVIDIA packages as they're handled by Modal's GPU environment
     )
     .env({
         "PYTHONUNBUFFERED": "1",
-        "MOVIEPY_USE_GPU": "1",  # Enable GPU acceleration
-        "FFMPEG_GPU": "1",  # Enable FFmpeg GPU support
-        "CUDA_VISIBLE_DEVICES": "0",  # Set CUDA device
-        "NVIDIA_VISIBLE_DEVICES": "0"  # Set NVIDIA device
+        "MOVIEPY_USE_GPU": "1",
+        "FFMPEG_GPU": "1"
     })
-    # Core application files (only those actually used by mainModel.py)
-    .add_local_file("mainModel.py", "/root/mainModel.py", copy=True)
-    .add_local_file("video_generator.py", "/root/video_generator.py", copy=True)
-    .add_local_file("bgm_processor.py", "/root/bgm_processor.py", copy=True)
-    .add_local_file("generate_images.py", "/root/generate_images.py", copy=True)
-    .add_local_file("generate_images_ideogram.py", "/root/generate_images_ideogram.py", copy=True)
-    .add_local_file("generate_images_ideogram_optimized.py", "/root/generate_images_ideogram_optimized.py", copy=True)
-    .add_local_file("gpt_highlight_bullets.py", "/root/gpt_highlight_bullets.py", copy=True)
-    .add_local_file("heygen_empty_spaces.json", "/root/heygen_empty_spaces.json", copy=True)
+    # Core application files
+    .copy_local_file("mainModel.py", "/app/mainModel.py")
+    .copy_local_file("video_generator.py", "/app/video_generator.py")
+    .copy_local_file("video_generator_portrait.py", "/app/video_generator_portrait.py")
+    .copy_local_file("bgm_processor.py", "/app/bgm_processor.py")
+    .copy_local_file("transition_manager.py", "/app/transition_manager.py")
+    .copy_local_file("requirements.txt", "/app/requirements.txt")
     
-    # Static assets and directories (all required for video generation)
-    .add_local_dir("background", "/root/background", copy=True)
-    .add_local_dir("BGM", "/root/BGM", copy=True)
-    .add_local_dir("circular-std-font-family", "/root/circular-std-font-family", copy=True)
-    .add_local_dir("uploads", "/root/uploads", copy=True)
-    .add_local_dir("transcripts", "/root/transcripts", copy=True)
-    .add_local_dir("segments", "/root/segments", copy=True)
-    .add_local_dir("generated_images_ideogram", "/root/generated_images_ideogram", copy=True)
+    # Static assets and resources
+    .copy_local_file("templates/", "/app/templates/")
+    .copy_local_file("background/", "/app/background/")
+    .copy_local_file("BGM/", "/app/BGM/")
+    .copy_local_file("circular-std-font-family/", "/app/circular-std-font-family/")
 )
 
-# Define the Modal App
-app = modal.App("videogen3-gpu-fastapi", image=image)
+# Create the Modal app
+app = modal.App("video-generator-app", image=image)
 
-# Expose the FastAPI app as a web endpoint with GPU L4
 @app.function(
-    secrets=[
-        modal.Secret.from_name("VideoGenSecret"),
-    ],
-    timeout=900,  # 15 min timeout for GPU processing
-    scaledown_window=600,  # 10 min scaledown window
-    cpu=16,  # 16 CPU cores for fast processing
-    gpu="L4",  # Use GPU L4 for best performance
-    memory=32768,  # 32GB RAM
+    gpu=modal.gpu.L4(),
+    timeout=3600,
+    memory=8192,
+    cpu=4
 )
-@modal.concurrent(max_inputs=20)  # Enable up to 20 concurrent requests per container
-@modal.asgi_app()
-def fastapi_app():
-    import sys
+def run_fastapi_app():
+    """
+    Run the FastAPI application with GPU acceleration
+    """
+    import uvicorn
     import os
+    import sys
     
-    # Configure GPU environment for Modal deployment
-    os.environ['MOVIEPY_USE_GPU'] = '1'  # Enable GPU for Modal
-    os.environ['FFMPEG_GPU'] = '1'  # Enable FFmpeg GPU support
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Set CUDA device
-    os.environ['NVIDIA_VISIBLE_DEVICES'] = '0'  # Set NVIDIA device
+    # Set working directory
+    os.chdir("/app")
     
-    # Fix PIL ANTIALIAS compatibility issue
-    try:
-        from PIL import Image
-        # Add ANTIALIAS back for compatibility with older MoviePy versions
-        if not hasattr(Image, 'ANTIALIAS'):
-            Image.ANTIALIAS = Image.LANCZOS
-        print("[MODAL DEPLOYMENT] Fixed PIL ANTIALIAS compatibility")
-    except Exception as e:
-        print(f"[MODAL DEPLOYMENT] Warning: Could not fix PIL compatibility: {e}")
+    # Set environment variables for GPU acceleration
+    os.environ["MOVIEPY_USE_GPU"] = "1"
+    os.environ["FFMPEG_GPU"] = "1"
     
-    # Add root to Python path
-    sys.path.append("/root")
+    print("🚀 Starting Video Generator App on Modal with GPU L4...")
+    print("📡 Server will be available at: http://0.0.0.0:8000")
+    print("📚 API Documentation: http://0.0.0.0:8000/docs")
+    print("⚡ GPU Acceleration: Enabled (L4)")
+    print("💾 Memory: 8GB")
+    print("🖥️ CPU: 4 cores")
     
-    # Import and return the FastAPI app
-    from mainModel import app
-    return app
+    # Run the FastAPI app
+    uvicorn.run(
+        "mainModel:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+        access_log=True
+    )
+
+@app.local_entrypoint()
+def main():
+    """
+    Main entry point for local development
+    """
+    print("🚀 Starting Video Generator App on Modal...")
+    print("☁️ Deploying to Modal cloud with GPU L4...")
+    print("⚡ GPU-accelerated video processing enabled")
+    print("🎬 Supporting both landscape and portrait orientations")
+    print("🎵 BGM processing with crossfade support")
+    print("🤖 HeyGen avatar overlay support")
+    print("🖼️ Ideogram image generation")
+    print("📊 OpenAI Whisper transcription")
+    print("🎙️ ElevenLabs TTS integration")
+    
+    # Deploy to Modal cloud
+    run_fastapi_app.remote()
+
+# Optional: Add a health check endpoint
+@app.function()
+def health_check():
+    """
+    Health check function for monitoring
+    """
+    return {
+        "status": "healthy",
+        "gpu_available": True,
+        "memory_gb": 8,
+        "cpu_cores": 4,
+        "timeout_seconds": 3600
+    }
+
+if __name__ == "__main__":
+    main()
