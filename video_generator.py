@@ -1570,21 +1570,37 @@ class VideoGenerator:
                 print_flush("[STEP 13] Using MAXIMUM PERFORMANCE parameters:")
                 print_flush(f"[STEP 13] {encoder_info}")
                 
-                # Write video with GPU acceleration
-                write_start = time.time()
-                final_video.write_videofile(
-                    output_file,
-                    fps=self.fps,
-                    codec=encoder_info['codec'],
-                    audio_codec='aac',
-                    preset=encoder_info['preset'],
-                    threads=encoder_info['threads'],
-                    verbose=False,
-                    logger=None,
-                    ffmpeg_params=encoder_info['ffmpeg_params']
-                )
-                write_time = time.time() - write_start
-                print_flush(f"[STEP 13] Video written with GPU acceleration in {write_time:.2f}s")
+                # Try GPU encode first; on any failure, hard-fallback to CPU
+                try:
+                    write_start = time.time()
+                    final_video.write_videofile(
+                        output_file,
+                        fps=self.fps,
+                        codec=encoder_info['codec'],
+                        audio_codec='aac',
+                        preset=encoder_info['preset'],
+                        threads=encoder_info['threads'],
+                        verbose=False,
+                        logger=None,
+                        ffmpeg_params=encoder_info['ffmpeg_params']
+                    )
+                    write_time = time.time() - write_start
+                    print_flush(f"[STEP 13] Video written with GPU acceleration in {write_time:.2f}s")
+                except Exception as gpu_err:
+                    print_flush(f"[ENCODER FALLBACK] GPU encode failed, switching to CPU. Reason: {gpu_err}")
+                    write_start = time.time()
+                    final_video.write_videofile(
+                        output_file,
+                        fps=self.fps,
+                        codec='libx264',
+                        audio_codec='aac',
+                        preset='ultrafast',
+                        threads=8,
+                        verbose=False,
+                        logger=None
+                    )
+                    write_time = time.time() - write_start
+                    print_flush(f"[STEP 13] Video written with CPU encoding in {write_time:.2f}s")
             else:
                 # Fallback to CPU encoding
                 print_flush("[STEP 13] Using CPU fallback encoding...")

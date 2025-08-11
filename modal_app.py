@@ -12,18 +12,18 @@ image = (
         "libsm6", 
         "libxext6", 
         "libxrender-dev"
-        # Removed NVIDIA packages as they're handled by Modal's GPU environment
+        # CPU-only deployment; no NVIDIA packages required
     )
     .env({
         "PYTHONUNBUFFERED": "1",
-        "MOVIEPY_USE_GPU": "1",  # Enable GPU acceleration
-        "FFMPEG_GPU": "1",  # Enable FFmpeg GPU support
-        "CUDA_VISIBLE_DEVICES": "0",  # Set CUDA device
-        "NVIDIA_VISIBLE_DEVICES": "0"  # Set NVIDIA device
+        # Force CPU mode
+        "MOVIEPY_USE_GPU": "0",
+        "FFMPEG_GPU": "0"
     })
     # Core application files (only those actually used by mainModel.py)
     .add_local_file("mainModel.py", "/root/mainModel.py", copy=True)
     .add_local_file("video_generator.py", "/root/video_generator.py", copy=True)
+    .add_local_file("video_generator_portrait.py", "/root/video_generator_portrait.py", copy=True)
     .add_local_file("bgm_processor.py", "/root/bgm_processor.py", copy=True)
     .add_local_file("generate_images.py", "/root/generate_images.py", copy=True)
     .add_local_file("generate_images_ideogram.py", "/root/generate_images_ideogram.py", copy=True)
@@ -42,30 +42,31 @@ image = (
 )
 
 # Define the Modal App
-app = modal.App("videogen3-gpu-fastapi", image=image)
+app = modal.App("videogen3-cpu-fastapi", image=image)
 
-# Expose the FastAPI app as a web endpoint with GPU L4
+# Expose the FastAPI app as a web endpoint (CPU only)
 @app.function(
     secrets=[
         modal.Secret.from_name("VideoGenSecret"),
     ],
-    timeout=900,  # 15 min timeout for GPU processing
-    scaledown_window=600,  # 10 min scaledown window
-    cpu=16,  # 16 CPU cores for fast processing
-    gpu="L4",  # Use GPU L4 for best performance
+    timeout=1200,  # 20 min timeout
+    scaledown_window=10,  # quick scale down after idle
+    cpu=16,  # CPU cores
     memory=32768,  # 32GB RAM
+    max_containers=100,  # Allow up to 25 containers
 )
-@modal.concurrent(max_inputs=20)  # Enable up to 20 concurrent requests per container
+@modal.concurrent(max_inputs=1)  # Each container handles only one request at a time
 @modal.asgi_app()
 def fastapi_app():
     import sys
     import os
     
-    # Configure GPU environment for Modal deployment
-    os.environ['MOVIEPY_USE_GPU'] = '1'  # Enable GPU for Modal
-    os.environ['FFMPEG_GPU'] = '1'  # Enable FFmpeg GPU support
-    os.environ['CUDA_VISIBLE_DEVICES'] = '0'  # Set CUDA device
-    os.environ['NVIDIA_VISIBLE_DEVICES'] = '0'  # Set NVIDIA device
+    # Force CPU mode inside the container
+    os.environ['MOVIEPY_USE_GPU'] = '0'
+    os.environ['FFMPEG_GPU'] = '0'
+    # Avoid any OpenCV CUDA auto-detection logs in container
+    os.environ['OPENCV_VIDEOIO_PRIORITY_MSMF'] = '0'
+    os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
     
     # Fix PIL ANTIALIAS compatibility issue
     try:
@@ -78,7 +79,8 @@ def fastapi_app():
         print(f"[MODAL DEPLOYMENT] Warning: Could not fix PIL compatibility: {e}")
     
     # Add root to Python path
-    sys.path.append("/root")
+    if "/root" not in sys.path:
+        sys.path.append("/root")
     
     # Import and return the FastAPI app
     from mainModel import app

@@ -6,7 +6,7 @@ import requests
 import time
 from typing import Optional, Tuple
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -275,8 +275,10 @@ def calculate_empty_space(slide, title_font, body_font):
         }
     }
 
-def upload_video_to_s3(video_path: str, filename: str) -> Optional[str]:
-    """Upload video to S3 and return the URL"""
+def upload_video_to_s3(video_path: str, filename: str, session_id: Optional[str] = None) -> Optional[str]:
+    """Upload video to S3 and return the URL.
+    If session_id is provided, store under "{session_id}/{filename}".
+    """
     try:
         s3 = boto3.client(
             's3',
@@ -284,8 +286,9 @@ def upload_video_to_s3(video_path: str, filename: str) -> Optional[str]:
             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
             region_name=AWS_DEFAULT_REGION
         )
-        s3.upload_file(video_path, S3_BUCKET_NAME, filename, ExtraArgs={'ContentType': 'video/mp4'})
-        return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{filename}"
+        s3_key = f"{session_id}/{filename}" if session_id else filename
+        s3.upload_file(video_path, S3_BUCKET_NAME, s3_key, ExtraArgs={'ContentType': 'video/mp4'})
+        return f"https://{S3_BUCKET_NAME}.s3.{AWS_DEFAULT_REGION}.amazonaws.com/{s3_key}"
     except Exception as e:
         print(f"Error uploading video to S3: {e}")
         return None
@@ -1042,46 +1045,48 @@ def correct_proper_nouns_in_transcript(proper_nouns, sentence_segments, word_seg
 
 # Image generation functions (integrated from generate_images_ideogram_optimized.py)
 def generate_image_ideogram_optimized(prompt, aspect_ratio, slide_number):
-    """Generate image using Ideogram 3.0 with optimized settings"""
-    IDEOGRAM_API_KEY = os.getenv('IDEOGRAM_API_KEY')
-    
+    """Generate image using new Lisa Automations endpoint (no API key required)."""
     print(f"🎨 Generating image for slide {slide_number}...")
-    
+
     try:
-        # Optimized API call with faster settings
+        # Call new endpoint (acts as Ideogram proxy). No API key needed.
         response = requests.post(
-            "https://api.ideogram.ai/v1/ideogram-v3/generate",
+            "https://automations.lisaapp.net/webhook/ideogramapilms",
             headers={
-                "Api-Key": IDEOGRAM_API_KEY,
                 "Content-Type": "application/json"
             },
             json={
                 "prompt": prompt,
-                "rendering_speed": "TURBO",  # Fastest rendering
                 "aspect_ratio": aspect_ratio,
-                "quality": "standard"  # Faster than high quality
+                "rendering_speed": "TURBO",
+                "quality": "standard"
             },
-            timeout=30  # Reduced timeout for faster failure detection
+            timeout=45
         )
-        
+
         response.raise_for_status()
         result = response.json()
-        
-        # Get the image URL from the response
-        image_url = result['data'][0]['url']
+
+        # Response shape is a list with first element containing a 'data' array; take first url
+        image_url = None
+        if isinstance(result, list) and result:
+            first = result[0]
+            data_list = first.get("data") if isinstance(first, dict) else None
+            if isinstance(data_list, list) and data_list:
+                image_url = data_list[0].get("url")
+
+        if not image_url:
+            raise ValueError("Image URL not found in response")
+
         print(f"✅ Image generated for slide {slide_number}")
-        
-        # Download the image with optimized settings
-        image_response = requests.get(
-            image_url, 
-            timeout=15,  # Faster timeout
-            stream=True  # Stream for better memory management
-        )
+
+        # Download the image
+        image_response = requests.get(image_url, timeout=20, stream=True)
         image_response.raise_for_status()
         image_bytes = image_response.content
-        
+
         return image_bytes, slide_number
-        
+
     except Exception as e:
         print(f"❌ Error generating image for slide {slide_number}: {e}")
         return None, slide_number
@@ -1153,15 +1158,7 @@ def process_slide_parallel(slide, session_id=None):
         return False
 
 def generate_images_from_slides(slides_json_path='segments/slides.json', session_id=None):
-    """Generate images for all slides that need them"""
-    # Check if API key is available
-    IDEOGRAM_API_KEY = os.getenv('IDEOGRAM_API_KEY')
-    if not IDEOGRAM_API_KEY:
-        print("❌ Error: IDEOGRAM_API_KEY not found in .env file")
-        print("Please add your Ideogram API key to the .env file:")
-        print("IDEOGRAM_API_KEY=your_api_key_here")
-        return False
-    
+    """Generate images for all slides that need them (uses internal endpoint, no API key)."""
     # Load slides.json
     try:
         with open(slides_json_path, 'r', encoding='utf-8') as f:
@@ -1265,7 +1262,7 @@ Return a JSON object with two keys: 'sentences' (corrected sentence segments) an
             {"role": "system", "content": "You are a transcript correction expert."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=4096,
+        max_tokens=8000,
         temperature=0.0
     )
     import re
@@ -1317,7 +1314,7 @@ Word-level SRT:
 {srt_word_content}
 '''
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": "You are a transcript correction expert."},
             {"role": "user", "content": prompt}
@@ -1619,10 +1616,10 @@ async def process_and_generate_video_json(request: VideoGenerationRequest):
                 # --- Upload to S3 ---
                 print(f"[JSON API] Uploading to S3...")
                 try:
-                    s3_url = upload_video_to_s3(output_filepath, output_filename)
+                    s3_url = upload_video_to_s3(output_filepath, output_filename, session_id=session_id)
                     heygen_s3_url = None
                     if heygen_overlay_video:
-                        heygen_s3_url = upload_video_to_s3(heygen_overlay_video, f"heygen_{output_filename}")
+                        heygen_s3_url = upload_video_to_s3(heygen_overlay_video, f"heygen_{output_filename}", session_id=session_id)
                     
                     result = {
                         "video_name": video_name_clean,
@@ -1941,7 +1938,7 @@ async def process_and_generate_video(
             
             # Upload to S3 using put_object
             filename = os.path.basename(output_video)
-            s3_url = upload_video_to_s3(output_video, filename)
+            s3_url = upload_video_to_s3(output_video, filename, session_id=session_id)
             # Optionally, upload a sample HeyGen overlay video if created
             heygen_overlay_video_path = None
             heygen_overlay_s3_url = None
@@ -1954,7 +1951,7 @@ async def process_and_generate_video(
                         break
             if heygen_overlay_video_path and os.path.exists(heygen_overlay_video_path):
                 heygen_overlay_filename = os.path.basename(heygen_overlay_video_path)
-                heygen_overlay_s3_url = upload_video_to_s3(heygen_overlay_video_path, heygen_overlay_filename)
+                heygen_overlay_s3_url = upload_video_to_s3(heygen_overlay_video_path, heygen_overlay_filename, session_id=session_id)
             
             # Store final result in Supabase when everything completes successfully
             # Session result stored in memory (container concurrency)
@@ -2122,6 +2119,186 @@ async def download_video(session_id: str):
     })
 
 
+
+# New: Blocking endpoint that returns S3 URL directly (no session id)
+@app.post("/generate_video_direct")
+async def generate_video_direct(request: VideoGenerationRequest):
+    session_id = f"{request.video_name}_{uuid.uuid4().hex[:8]}"
+    session_uploads, session_transcripts, session_segments, session_images = create_session_directories(session_id)
+
+    if not request.audio_url and not request.script:
+        return JSONResponse({"error": "Please provide either an audio_url or a script."}, status_code=400)
+    if not request.video_name:
+        return JSONResponse({"error": "Video name is required"}, status_code=400)
+
+    video_name_clean = re.sub(r'[^a-zA-Z0-9_]', '_', request.video_name)
+    if not video_name_clean:
+        return JSONResponse({"error": "Invalid video name"}, status_code=400)
+
+    try:
+        # Input audio
+        if request.audio_url:
+            filename, filepath = download_audio_file(request.audio_url)
+            if not filename:
+                filename = f"audio_{random.randint(1000,9999)}.mp3"
+            if not filepath:
+                return JSONResponse({"error": "Failed to download audio file."}, status_code=400)
+            import shutil
+            session_filepath = os.path.join(session_uploads, filename)
+            shutil.move(filepath, session_filepath)
+            filepath = session_filepath
+        else:
+            use_speed = request.speed if request.speed is not None else 1.0
+            use_voice_id = request.voice_id if request.voice_id else ELEVENLABS_DEFAULT_VOICE_ID
+            use_stability = request.stability if request.stability is not None else 0.35
+            use_similarity_boost = request.similarity_boost if request.similarity_boost is not None else 0.40
+            filename, filepath = generate_audio_from_script(request.script, use_speed, use_voice_id, use_stability, use_similarity_boost)
+            import shutil
+            session_filepath = os.path.join(session_uploads, filename)
+            shutil.move(filepath, session_filepath)
+            filepath = session_filepath
+
+        if not os.path.exists(filepath):
+            return JSONResponse({"error": "Audio file not found after upload/generation."}, status_code=500)
+
+        # Transcribe
+        sentence_segments, word_segments, audio_duration = transcribe_audio(filepath)
+        base_filename = filename.rsplit('.', 1)[0] if filename and '.' in filename else filename or f"audio_{random.randint(1000,9999)}"
+        srt_filename = f"{base_filename}_sentences.srt"
+        srt_filepath = os.path.join(session_transcripts, srt_filename)
+        create_srt_file(sentence_segments, srt_filepath)
+        word_srt_filename = f"{base_filename}_words.srt"
+        word_srt_filepath = os.path.join(session_transcripts, word_srt_filename)
+        create_word_srt_file(word_segments, word_srt_filepath)
+
+        # Optional SRT correction when script provided
+        if request.script:
+            with open(srt_filepath, 'r', encoding='utf-8') as f:
+                srt_sentence_content = f.read()
+            with open(word_srt_filepath, 'r', encoding='utf-8') as f:
+                srt_word_content = f.read()
+            corrected_sentence_srt, corrected_word_srt = gpt_refactor_transcripts_srt(request.script, srt_sentence_content, srt_word_content)
+            with open(srt_filepath, 'w', encoding='utf-8') as f:
+                f.write(corrected_sentence_srt)
+            with open(word_srt_filepath, 'w', encoding='utf-8') as f:
+                f.write(corrected_word_srt)
+
+        # Slides + segments
+        slides_json_path = os.path.join(session_segments, 'slides.json')
+        orientation = request.orientation or "landscape"
+        if request.script:
+            corrected_segments = parse_srt_to_segments(corrected_sentence_srt)
+            audio_segments = segment_transcript_variable_duration(corrected_segments, srt_filepath, audio_duration, orientation)
+            create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience, orientation=orientation)
+        else:
+            audio_segments = segment_transcript_variable_duration(sentence_segments, srt_filepath, audio_duration, orientation)
+            create_slides_json_from_segments(audio_segments, slides_json_path, target_audience=request.target_audience, orientation=orientation)
+
+        segments_filename = f"{base_filename}_segments.json"
+        segments_filepath = os.path.join(session_segments, segments_filename)
+        segments_data = {
+            "segments": [
+                {
+                    "segment_id": i + 1,
+                    "start_time": seg["start"] if isinstance(seg, dict) and "start" in seg else 0,
+                    "end_time": seg["end"] if isinstance(seg, dict) and "end" in seg else 0,
+                    "duration": (seg["end"] - seg["start"]) if isinstance(seg, dict) and "end" in seg and "start" in seg else 0,
+                    "text": seg["text"] if isinstance(seg, dict) and "text" in seg else "",
+                    "format": seg.get("format", None)
+                } for i, seg in enumerate(audio_segments) if isinstance(seg, dict)
+            ]
+        }
+        with open(segments_filepath, 'w', encoding='utf-8') as f:
+            json.dump(segments_data, f, indent=2, ensure_ascii=False)
+
+        # Images + highlights
+        try:
+            generate_images_from_slides(slides_json_path, session_id)
+        except Exception:
+            pass
+        try:
+            add_highlights_to_slides(slides_json_path)
+        except Exception:
+            pass
+
+        # BGM processing
+        try:
+            bgm_volume = request.bgm_volume if request.bgm_volume is not None else 50
+            bgm_crossfade = request.bgm_crossfade if request.bgm_crossfade is not None else 2000
+            video_audio_path = process_bgm_audio(filepath, srt_filepath, segments_filepath, bgm_volume, bgm_crossfade)
+        except Exception:
+            video_audio_path = filepath
+
+        # Video generation
+        if orientation == 'portrait':
+            video_gen = VideoGeneratorPortrait(
+                segments_folder=session_segments,
+                transcripts_folder=session_transcripts,
+                font_folder='circular-std-font-family',
+                session_id=session_id
+            )
+        else:
+            video_gen = VideoGenerator(
+                segments_folder=session_segments,
+                transcripts_folder=session_transcripts,
+                font_folder='circular-std-font-family',
+                session_id=session_id
+            )
+
+        output_filename = f"{video_name_clean}.mp4"
+        output_filepath = os.path.join(session_uploads, output_filename)
+        video_gen.generate_video(
+            segments_file=segments_filepath,
+            word_srt_file=word_srt_filepath,
+            audio_file=video_audio_path,
+            output_file=output_filepath,
+            show_subtitles=request.show_subtitles.lower() == "true"
+        )
+
+        # Optional HeyGen overlays (same behavior as JSON endpoint)
+        heygen_overlay_video = None
+        if request.has_heygen:
+            heygen_empty_spaces_path = os.path.join(session_segments, 'heygen_empty_spaces.json')
+            try:
+                calculate_and_save_heygen_empty_spaces(slides_json_path, heygen_empty_spaces_path)
+                heygen_overlay_video = overlay_heygen_avatars(
+                    heygen_empty_spaces_path=heygen_empty_spaces_path,
+                    segments_filepath=segments_filepath,
+                    filepath=output_filepath,
+                    session_uploads=session_uploads,
+                    session_segments=session_segments,
+                    session_id=session_id,
+                    has_heygen=request.has_heygen
+                )
+            except Exception:
+                heygen_overlay_video = None
+
+        # Upload to S3 and return the S3 URL
+        s3_url = None
+        heygen_s3_url = None
+        try:
+            s3_url = upload_video_to_s3(output_filepath, output_filename, session_id=session_id)
+            if heygen_overlay_video:
+                heygen_s3_url = upload_video_to_s3(heygen_overlay_video, f"heygen_{output_filename}", session_id=session_id)
+        except Exception as e:
+            print(f"[DIRECT SYNC] S3 upload failed: {e}")
+
+        if not s3_url:
+            return JSONResponse({
+                "success": False,
+                "error": "S3 upload failed",
+                "video_filename": output_filename
+            }, status_code=500)
+
+        return JSONResponse({
+            "success": True,
+            "video_filename": output_filename,
+            "s3_url": s3_url,
+            "heygen_overlay_s3_url": heygen_s3_url,
+        })
+
+    except Exception as e:
+        return JSONResponse({"error": f"Video generation failed: {e}"}, status_code=500)
 
 # --- Calculate and save heygen_empty_spaces.json ---
 def calculate_and_save_heygen_empty_spaces(slides_json_path, output_path):
