@@ -55,7 +55,7 @@ app = modal.App("videogen3-cpu-fastapi", image=image)
     memory=32768,  # 32GB RAM
     max_containers=100,  # Allow up to 25 containers
 )
-@modal.concurrent(max_inputs=1)  # Each container handles only one request at a time
+@modal.concurrent(max_inputs=4)  # Each container handles only one request at a time
 @modal.asgi_app()
 def fastapi_app():
     import sys
